@@ -1,0 +1,4181 @@
+import json
+import os
+import sys
+import traceback
+import subprocess
+import tkinter as tk
+from tkinter import messagebox, scrolledtext, filedialog, ttk, simpledialog
+import difflib
+import threading
+import time
+import webbrowser
+import re
+
+# Import the cyberpunk audio engine
+try:
+    from cyberpunk_audio import start_music, stop_music, set_music_volume, scan_audio_files, pause_local_audio, resume_local_audio, stop_local_audio
+    AUDIO_ENGINE_AVAILABLE = True
+except ImportError:
+    print("Warning: cyberpunk_audio.py not found, audio features disabled")
+    AUDIO_ENGINE_AVAILABLE = False
+    def scan_audio_files(): return []
+    def pause_local_audio(): pass
+    def resume_local_audio(): pass
+    def stop_local_audio(): pass
+    def start_music(settings): pass
+    def stop_music(): pass
+    def set_music_volume(volume): pass
+import keyword
+import random
+import winsound
+import math
+import struct
+import wave
+import tempfile
+import atexit
+
+# =====================
+# 📝 ERROR LOGGING
+# =====================
+LOG_FILE = "rogue_agent.log"
+
+def log_error(message, error_type="ERROR"):
+    """Log errors to a local file and store in memory"""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] [{error_type}] {message}\n"
+    
+    # Capture traceback if available and not already in message
+    if error_type == "ERROR":
+        try:
+            tb = traceback.format_exc()
+            if tb and "NoneType: None" not in tb:
+                log_entry += f"Traceback:\n{tb}\n"
+        except Exception:
+            pass
+
+    # Write to file
+    try:
+        log_path = os.path.join(BASE_DIR, LOG_FILE) if BASE_DIR else LOG_FILE
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+    except Exception:
+        pass # If logging fails, we can't really log that
+
+# Wrapper functions for messagebox to include logging
+def show_info_log(title, message):
+    log_error(f"INFO [{title}]: {message}", "INFO")
+    messagebox.showinfo(title, message)
+
+def show_warning_log(title, message):
+    log_error(f"WARNING [{title}]: {message}", "WARNING")
+    messagebox.showwarning(title, message)
+
+def show_error_log(title, message):
+    log_error(f"ERROR [{title}]: {message}", "ERROR")
+    messagebox.showerror(title, message)
+
+def copy_error_log():
+    """Copy the last 50 lines of the error log to clipboard"""
+    try:
+        log_path = os.path.join(BASE_DIR, LOG_FILE) if BASE_DIR else LOG_FILE
+        if not os.path.exists(log_path):
+            show_info_log("Error Log", "No error log found.")
+            return
+            
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        # Get last 50 lines
+        recent_logs = "".join(lines[-50:])
+        root.clipboard_clear()
+        root.clipboard_append(recent_logs)
+        root.update()
+        show_info_log("Error Log", "Last 50 log entries copied to clipboard.")
+    except Exception as e:
+        show_error_log("Error", f"Failed to copy logs: {str(e)}")
+
+# =====================
+# 🎨 DARK MODE COLORS
+# =====================
+BG_MAIN = "#1e1e1e"
+BG_PANEL = "#252526"
+FG_TEXT = "#d4d4d4"
+ACCENT = "#3c3c3c"
+HIGHLIGHT = "#007acc"
+TOOLTIP_BG = "#333333"
+TOOLTIP_FG = "#ffffff"
+QUEUE_BG = "#2d2d2d"
+QUEUE_PENDING = "#FFA500"  # orange
+QUEUE_EXECUTED = "#4CAF50" # green
+QUEUE_ERROR = "#F44336"    # red
+DIFF_ADDED = "#144212"     # dark green background for additions
+DIFF_REMOVED = "#4F0000"   # dark red background for removals
+
+# =====================
+# 🖥️ APP STATE
+# =====================
+BASE_DIR = None
+QUEUE_FILE = None
+current_file = None
+file_modified = False
+file_map = {}
+current_filter = "All"
+tooltip = None
+current_queue_idx = None
+file_tree_updating = False
+file_tree = None  # Declare file_tree at global level
+code_editor = None  # Declare code_editor at global level
+logo_canvas = None  # Declare logo_canvas at global level
+logo_frame = None  # Declare logo_frame at global level
+search_entry = None  # Declare search_entry at global level
+status_label = None  # Declare status_label at global level
+project_path_display = None  # Declare project_path_display at global level
+
+# Cyberpunk color palette for ASCII art and effects
+ascii_palette = ["#00eaff", "#ff2448", "#a000ff", "#00ff66", "#9cdcfe", "#c586c0"]
+ascii_index = 0
+
+# Color utility functions for cyberpunk effects
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+def _rgb_to_hex(r, g, b):
+    return f"#{r:02x}{g:02x}{b:02x}"
+def blend_hex(fg_hex, bg_hex, alpha):
+    fr, fg, fb = _hex_to_rgb(fg_hex)
+    br, bgc, bb = _hex_to_rgb(bg_hex)
+    r = int(fr * alpha + br * (1 - alpha))
+    g = int(fg * alpha + bgc * (1 - alpha))
+    b = int(fb * alpha + bb * (1 - alpha))
+    return _rgb_to_hex(r, g, b)
+
+
+settings = {
+    "matrix": {
+        "enabled": True,
+        "coverage": "header",
+        "density_per_column": 1, # Now represents streams per column
+        "opacity": 0.3, # Lowered for better readability
+        "weights": {"digits": 0.4, "letters": 0.4, "special": 0.2}
+    },
+    "crt": {
+        "enabled": False,
+        "intensity": 0.2,
+        "transition_ms": 400,
+        "scanlines": True,
+        "rgb_separation": True
+    },
+    "interactive": {
+        "beeping_lights": True,
+        "button_palette": "neon",
+        "sfx_enabled": True,
+        "sfx_volume": 0.6
+    },
+    "audio": {
+        "music_enabled": False,
+        "music_volume": 0.5,
+        "music_file": "",
+        "mute_music": False,
+        "mute_sfx": False
+    },
+    "performance": {
+        "quality": "medium",
+        "fps": 60
+    }
+}
+SETTINGS_FILE = None
+def load_settings():
+    global settings
+    try:
+        if SETTINGS_FILE and os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for k in settings:
+                if k in data and isinstance(data[k], dict):
+                    settings[k].update(data[k])
+    except Exception:
+        pass
+def save_settings():
+    try:
+        if SETTINGS_FILE:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2)
+    except Exception:
+        pass
+# =====================
+# 📦 JSON QUEUE
+# =====================
+def load_queue():
+    if not QUEUE_FILE or not os.path.exists(QUEUE_FILE):
+        return {"queue": []}
+    with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_queue(queue):
+    if not QUEUE_FILE:
+        return
+    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump(queue, f, indent=2)
+
+# =====================
+# 🆕 QUEUE MANAGEMENT FUNCTIONS
+# =====================
+
+def clear_queue():
+    """Clear all tasks from the queue"""
+    if not QUEUE_FILE:
+        return
+    if messagebox.askyesno("Clear Queue", "Are you sure you want to clear all tasks?"):
+        save_queue({"queue": []})
+        refresh_queue_viewer()
+
+
+# =====================
+# 📁 PROJECT FILES
+# =====================
+dir_map = {} # New global map to store directories
+
+def scan_project_files():
+    file_map.clear()
+    dir_map.clear()
+    if not BASE_DIR:
+        return
+    for root_dir, dirs, files in os.walk(BASE_DIR):
+        # Collect directories
+        for d in dirs:
+            full_path = os.path.join(root_dir, d)
+            rel_path = os.path.relpath(full_path, BASE_DIR)
+            dir_map[rel_path] = full_path
+
+        for name in files:
+            if current_filter == "All" or name.endswith(current_filter.lower()):
+                full_path = os.path.join(root_dir, name)
+                rel_path = os.path.relpath(full_path, BASE_DIR)
+                file_map[rel_path] = full_path
+    if 'filter_menu' in globals():
+        update_filter_menu()
+
+def refresh_file_list():
+    if 'file_tree' not in globals():
+        return
+    global file_tree_updating
+    
+    # Update project path display
+    if 'project_path_display' in globals() and project_path_display:
+        display_text = BASE_DIR if BASE_DIR else "No project loaded"
+        project_path_display.config(text=display_text)
+        
+    file_tree_updating = True
+    try:
+        yview_top = file_tree.yview()[0]
+    except Exception:
+        yview_top = None
+    prev_selection = list(file_tree.selection())
+    expanded = set()
+    def collect_expanded(parent=""):
+        for iid in file_tree.get_children(parent):
+            try:
+                if file_tree.item(iid, "open"):
+                    expanded.add(iid)
+            except Exception:
+                pass
+            collect_expanded(iid)
+    collect_expanded("")
+    for child in file_tree.get_children():
+        file_tree.delete(child)
+    # Build nested structure
+    structure = {}
+    term = file_search_var.get().lower().strip() if 'file_search_var' in globals() else ""
+    
+    # Add files
+    for rel_path, full_path in file_map.items():
+        if term and term not in rel_path.lower():
+            continue
+        parts = rel_path.split(os.sep)
+        node = structure
+        for p in parts[:-1]:
+            node = node.setdefault(p, {})
+        node[parts[-1]] = full_path
+        
+    # Add directories (ensure empty folders appear)
+    # Only if not searching (or if we want to search folders too)
+    if not term:
+        for rel_path in dir_map:
+            parts = rel_path.split(os.sep)
+            node = structure
+            for p in parts:
+                node = node.setdefault(p, {})
+
+    # Insert into treeview
+    def insert_node(parent, name, value, rel_accum):
+        if isinstance(value, dict):
+            iid = rel_accum + name + os.sep if rel_accum else name + os.sep
+            file_tree.insert(parent, "end", iid=iid, text=name, tags=("dir",))
+            for child_name in sorted(value.keys()):
+                insert_node(iid, child_name, value[child_name], iid)
+        else:
+            iid = rel_accum + name if rel_accum else name
+            file_tree.insert(parent, "end", iid=iid, text=name, tags=("file",))
+    for top_name in sorted(structure.keys()):
+        insert_node("", top_name, structure[top_name], "")
+    for iid in expanded:
+        try:
+            file_tree.item(iid, open=True)
+        except Exception:
+            pass
+    target_selection = prev_selection
+    if not target_selection and current_file and BASE_DIR:
+        rel = os.path.relpath(current_file, BASE_DIR)
+        target_selection = [rel]
+    if target_selection:
+        try:
+            # Only set selection if changed to avoid triggering select event
+            current_sel = list(file_tree.selection())
+            if current_sel != target_selection:
+                file_tree.selection_set(target_selection)
+            file_tree.see(target_selection[0])
+        except Exception:
+            pass
+    if yview_top is not None:
+        try:
+            file_tree.yview_moveto(yview_top)
+        except Exception:
+            pass
+    try:
+        sel = file_tree.selection()
+        if sel:
+            rel_path = sel[0].rstrip(os.sep)
+            fp = file_map.get(rel_path, "")
+            if 'path_label' in globals():
+                path_label.full_path = fp
+                display_text = fp
+                if len(display_text) > 35:
+                    display_text = "..." + display_text[-32:]
+                path_label.config(text=display_text)
+    except Exception:
+        pass
+    file_tree_updating = False
+
+def set_filter(value):
+    global current_filter
+    current_filter = value
+    scan_project_files()
+    refresh_file_list()
+
+
+# =====================
+# 🔎 Search Find
+# =====================
+
+search_matches = []
+current_match = -1
+
+def search_code(event=None):
+    global search_matches, current_match
+    term = search_var.get()
+    code_editor.tag_remove("search_highlight", "1.0", tk.END)
+    search_matches.clear()
+    current_match = -1
+
+    if not term:
+        return
+
+    idx = "1.0"
+    while True:
+        idx = code_editor.search(term, idx, nocase=True, stopindex=tk.END)
+        if not idx:
+            break
+        end = f"{idx}+{len(term)}c"
+        search_matches.append((idx, end))
+        code_editor.tag_add("search_highlight", idx, end)
+        idx = end
+
+    if search_matches:
+        current_match = 0
+        jump_to_match(0)
+
+def jump_to_match(i):
+    if not search_matches:
+        return
+    start, end = search_matches[i]
+    code_editor.see(start)
+    code_editor.mark_set("insert", start)
+    code_editor.focus_set()
+
+def find_next():
+    global current_match
+    if not search_matches:
+        search_code()
+        return
+    current_match = (current_match + 1) % len(search_matches)
+    jump_to_match(current_match)
+
+def find_prev():
+    global current_match
+    if not search_matches:
+        search_code()
+        return
+    current_match = (current_match - 1) % len(search_matches)
+    jump_to_match(current_match)
+
+def clear_search():
+    global search_matches, current_match
+    search_var.set("")
+    search_matches.clear()
+    current_match = -1
+    code_editor.tag_remove("search_highlight", "1.0", tk.END)
+
+
+# =====================
+# 💾 FILE SAVE & STATE
+# =====================
+
+
+# =====================
+# 💾 FILE SAVE & STATE
+# =====================
+
+def update_title():
+    title = "Rogue Agent Editor"
+    if current_file:
+        title += f" - {os.path.basename(current_file)}"
+    if file_modified:
+        title += " ●"
+    if 'root' in globals():
+        root.title(title)
+
+def on_content_changed(event=None):
+    global file_modified
+    if 'code_editor' in globals() and code_editor.edit_modified():
+        if not file_modified:
+            file_modified = True
+            update_title()
+        code_editor.edit_modified(False)
+
+def check_unsaved_changes():
+    """Returns True if it's safe to proceed (saved or discarded), False if cancelled."""
+    global file_modified
+    if file_modified and current_file:
+        response = messagebox.askyesnocancel("Unsaved Changes", f"Do you want to save changes to {os.path.basename(current_file)}?")
+        if response is True: # Yes
+            save_current_file()
+            return True
+        elif response is False: # No
+            return True
+        else: # Cancel
+            return False
+    return True
+
+def on_closing():
+    if check_unsaved_changes():
+        root.destroy()
+
+# =====================
+# 🖥️ TKINTER APP
+# =====================
+root = tk.Tk()
+root.title("") # Empty title to avoid duplicate text
+root.geometry("1700x900")
+root.configure(bg=BG_MAIN)
+
+top_frame = tk.Frame(root, bg=BG_MAIN)
+top_frame.pack(fill=tk.X)
+logo_canvas = tk.Canvas(top_frame, height=90, bg=BG_MAIN, highlightthickness=0)
+logo_canvas.pack(fill=tk.X)
+
+main_frame = tk.Frame(root, bg=BG_MAIN)
+main_frame.pack(fill=tk.BOTH, expand=True)
+
+# --- File List Panel ---
+file_frame = tk.Frame(main_frame, bg=BG_PANEL, width=300)
+file_frame.pack(side=tk.LEFT, fill=tk.Y)
+file_frame.pack_propagate(False)
+tk.Label(file_frame, text="Project Files", bg=BG_PANEL, fg=FG_TEXT).pack(anchor="w", padx=10, pady=(8,0))
+project_path_display = tk.Label(file_frame, text="No project loaded", bg=BG_PANEL, fg="#808080", font=("Segoe UI", 8), wraplength=280, justify="left")
+project_path_display.pack(anchor="w", padx=10, pady=(0,4))
+
+tk.Label(file_frame, text="Search Files", bg=BG_PANEL, fg=TOOLTIP_FG, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10, pady=(0,2))
+file_search_var = tk.StringVar(value="")
+file_search_entry = tk.Entry(
+    file_frame,
+    textvariable=file_search_var,
+    bg="#2b2b2b",
+    fg=FG_TEXT,
+    insertbackground=FG_TEXT,
+    relief=tk.SOLID,
+    highlightthickness=1,
+    highlightbackground=HIGHLIGHT,
+    borderwidth=2
+)
+file_search_entry.pack(fill=tk.X, padx=10, pady=(0,8), ipady=4)
+def on_file_search_change(*args):
+    refresh_file_list()
+file_search_var.trace_add("write", lambda *args: on_file_search_change())
+file_tree = ttk.Treeview(file_frame, show="tree", style="Project.Treeview")
+file_tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=5)
+path_label = tk.Label(file_frame, text="", bg=BG_PANEL, fg=TOOLTIP_FG, anchor="w")
+path_label.pack(fill=tk.X, padx=10, pady=(4,8))
+
+# Tooltip logic for path_label
+path_tooltip_win = None
+def show_path_tooltip(event):
+    global path_tooltip_win
+    if path_tooltip_win:
+        path_tooltip_win.destroy()
+    text = getattr(path_label, "full_path", "")
+    if not text: return
+    path_tooltip_win = tk.Toplevel(path_label)
+    path_tooltip_win.wm_overrideredirect(True)
+    path_tooltip_win.wm_geometry(f"+{event.x_root+15}+{event.y_root+10}")
+    tk.Label(path_tooltip_win, text=text, bg=TOOLTIP_BG, fg=TOOLTIP_FG, padx=6, pady=3).pack()
+
+def hide_path_tooltip(event):
+    global path_tooltip_win
+    if path_tooltip_win:
+        path_tooltip_win.destroy()
+        path_tooltip_win = None
+
+path_label.bind("<Enter>", show_path_tooltip)
+path_label.bind("<Leave>", hide_path_tooltip)
+
+style_files = ttk.Style()
+style_files.theme_use("default")
+style_files.configure("Project.Treeview", background=BG_PANEL, foreground=FG_TEXT, fieldbackground=BG_PANEL, rowheight=22)
+style_files.map("Project.Treeview", background=[('selected', HIGHLIGHT)], foreground=[('selected', FG_TEXT)])
+
+# Tooltip for full path
+def update_path_label_for_selection():
+    sel = file_tree.selection()
+    if not sel:
+        path_label.config(text="")
+        path_label.full_path = ""
+        return
+    rel = sel[0].rstrip(os.sep)
+    full_path = file_map.get(rel, "")
+    # Fallback for directories that might not be in file_map directly if they are empty or just parents
+    if not full_path and BASE_DIR:
+        full_path = os.path.join(BASE_DIR, rel)
+        
+    path_label.full_path = full_path
+    
+    # Truncate for display if needed
+    display_text = full_path
+    if len(display_text) > 35:
+        display_text = "..." + display_text[-32:]
+    path_label.config(text=display_text)
+
+# =====================
+# 🖱️ PROJECT TREE CONTEXT MENU
+# =====================
+project_context_menu = tk.Menu(root, tearoff=0)
+clipboard_path = None
+clipboard_paths = []
+clipboard_action = None  # 'copy' or 'move'
+
+def get_selected_paths():
+    """Returns a list of full paths for all selected items."""
+    if 'file_tree' not in globals(): return []
+    selection = file_tree.selection()
+    paths = []
+    for iid in selection:
+        rel = iid.rstrip(os.sep)
+        path = file_map.get(rel)
+        if not path and BASE_DIR:
+             path = os.path.join(BASE_DIR, rel)
+        if path:
+            # Normalize path to fix mix of forward/backward slashes which causes Errno 3 with extended paths
+            paths.append(os.path.normpath(path))
+    return paths
+
+def get_selected_path():
+    paths = get_selected_paths()
+    return paths[0] if paths else None
+
+def on_tree_context_menu(event):
+    # Select item under mouse ONLY if not already in selection
+    item = file_tree.identify_row(event.y)
+    if item:
+        if item not in file_tree.selection():
+            file_tree.selection_set(item)
+        project_context_menu.post(event.x_root, event.y_root)
+
+def ctx_new_folder():
+    parent_path = get_selected_path()
+    if not parent_path:
+        parent_path = BASE_DIR
+    
+    # If file selected, use its parent dir
+    if os.path.isfile(parent_path):
+        parent_path = os.path.dirname(parent_path)
+        
+    name = simpledialog.askstring("New Folder", "Folder Name:", parent=root)
+    if name:
+        new_dir = os.path.join(parent_path, name)
+        try:
+            os.makedirs(new_dir, exist_ok=True)
+            scan_project_files()
+            refresh_file_list()
+        except Exception as e:
+            show_error_log("Error", f"Failed to create folder: {e}")
+
+def ctx_new_file():
+    parent_path = get_selected_path()
+    if not parent_path:
+        parent_path = BASE_DIR
+    
+    if os.path.isfile(parent_path):
+        parent_path = os.path.dirname(parent_path)
+        
+    name = simpledialog.askstring("New File", "File Name:", parent=root)
+    if name:
+        new_file = os.path.join(parent_path, name)
+        try:
+            with open(new_file, 'w') as f:
+                pass
+            scan_project_files()
+            refresh_file_list()
+            open_selected_file(new_file)
+        except Exception as e:
+            show_error_log("Error", f"Failed to create file: {e}")
+
+def ctx_delete():
+    global current_file, file_modified
+    paths = get_selected_paths()
+    if not paths: return
+    
+    count = len(paths)
+    msg = f"Move {count} items to Recycle Bin?" if count > 1 else f"Move to Recycle Bin:\n{os.path.basename(paths[0])}?"
+    
+    if not messagebox.askyesno("Confirm Delete", msg):
+        return
+        
+    deleted_count = 0
+    errors = []
+    
+    for path in paths:
+        try:
+            from send2trash import send2trash
+            send2trash(path)
+            
+            # Close if it was open
+            if current_file and os.path.normpath(current_file) == os.path.normpath(path):
+                code_editor.delete("1.0", tk.END)
+                current_file = None
+                file_modified = False
+                update_title()
+                code_editor.edit_modified(False)
+            deleted_count += 1
+        except Exception as e:
+            errors.append(f"{os.path.basename(path)}: {e}")
+            
+    scan_project_files()
+    refresh_file_list()
+    
+    if errors:
+        show_error_log("Delete Errors", "\n".join(errors))
+
+def ctx_copy():
+    global clipboard_path, clipboard_paths, clipboard_action
+    paths = get_selected_paths()
+    if paths:
+        clipboard_paths = paths
+        clipboard_path = paths[0] # Legacy support
+        clipboard_action = 'copy'
+        count = len(paths)
+        if count > 1:
+            show_info_log("Clipboard", f"Copied {count} items")
+        else:
+            show_info_log("Clipboard", f"Copied: {os.path.basename(paths[0])}")
+
+def ctx_paste():
+    global clipboard_path, clipboard_paths, clipboard_action
+    
+    # Normalizing clipboard content
+    items_to_paste = []
+    if 'clipboard_paths' in globals() and clipboard_paths:
+        items_to_paste = clipboard_paths
+    elif clipboard_path and os.path.exists(clipboard_path):
+        items_to_paste = [clipboard_path]
+        
+    if not items_to_paste:
+        show_error_log("Error", "Clipboard is empty.")
+        return
+        
+    dest_path = get_selected_path()
+    if not dest_path: dest_path = BASE_DIR
+    
+    # If dest is file, use parent
+    if os.path.isfile(dest_path):
+        dest_path = os.path.dirname(dest_path)
+        
+    try:
+        import shutil
+        errors = []
+        pasted_count = 0
+        
+        for src_path in items_to_paste:
+            if not os.path.exists(src_path):
+                continue
+                
+            try:
+                basename = os.path.basename(src_path)
+                target = os.path.join(dest_path, basename)
+                
+                # Handle collision
+                if os.path.exists(target):
+                    if not messagebox.askyesno("Overwrite?", f"{basename} already exists. Overwrite?"):
+                        continue
+                    if os.path.isdir(target):
+                        shutil.rmtree(target)
+                    else:
+                        os.remove(target)
+                        
+                if os.path.isdir(src_path):
+                    # Check for recursive copy
+                    if os.path.commonpath([src_path, target]) == os.path.normpath(src_path):
+                        errors.append(f"Skipped {basename}: Cannot paste into itself")
+                        continue
+                    shutil.copytree(src_path, target)
+                else:
+                    shutil.copy2(src_path, target)
+                pasted_count += 1
+                
+            except Exception as item_e:
+                errors.append(f"{os.path.basename(src_path)}: {item_e}")
+                
+        scan_project_files()
+        refresh_file_list()
+        
+        if errors:
+            show_error_log("Paste Errors", "\n".join(errors))
+        if pasted_count > 0:
+            show_info_log("Success", f"Pasted {pasted_count} items to {os.path.basename(dest_path)}")
+        
+    except Exception as e:
+        show_error_log("Paste Error", str(e))
+
+def ctx_rename():
+    path = get_selected_path()
+    if not path: return
+    
+    dirname = os.path.dirname(path)
+    basename = os.path.basename(path)
+    
+    new_name = simpledialog.askstring("Rename", "New Name:", initialvalue=basename, parent=root)
+    if not new_name or new_name == basename:
+        return
+        
+    new_path = os.path.join(dirname, new_name)
+    if os.path.exists(new_path):
+        show_error_log("Error", f"Destination already exists: {new_name}")
+        return
+        
+    try:
+        os.rename(path, new_path)
+        scan_project_files()
+        refresh_file_list()
+        # If current file was renamed, update current_file
+        global current_file
+        if current_file and os.path.normpath(current_file) == os.path.normpath(path):
+            current_file = new_path
+            update_title()
+    except Exception as e:
+        show_error_log("Error", f"Failed to rename: {e}")
+
+def ctx_duplicate():
+    paths = get_selected_paths()
+    if not paths: return
+    
+    import shutil
+    errors = []
+    duplicated_count = 0
+    
+    for path in paths:
+        try:
+            dirname = os.path.dirname(path)
+            basename = os.path.basename(path)
+            name, ext = os.path.splitext(basename)
+            
+            # Find a non-conflicting name
+            counter = 1
+            while True:
+                new_name = f"{name}_copy{counter}{ext}"
+                new_path = os.path.join(dirname, new_name)
+                if not os.path.exists(new_path):
+                    break
+                counter += 1
+                
+            if os.path.isdir(path):
+                shutil.copytree(path, new_path)
+            else:
+                shutil.copy2(path, new_path)
+            duplicated_count += 1
+            
+        except Exception as e:
+            errors.append(f"{os.path.basename(path)}: {e}")
+            
+    scan_project_files()
+    refresh_file_list()
+    
+    if errors:
+        show_error_log("Duplicate Errors", "\n".join(errors))
+
+project_context_menu.add_command(label="New File", command=ctx_new_file)
+project_context_menu.add_command(label="New Folder", command=ctx_new_folder)
+project_context_menu.add_separator()
+project_context_menu.add_command(label="Rename", command=ctx_rename)
+project_context_menu.add_command(label="Duplicate", command=ctx_duplicate)
+project_context_menu.add_separator()
+project_context_menu.add_command(label="Copy", command=ctx_copy)
+project_context_menu.add_command(label="Paste", command=ctx_paste)
+project_context_menu.add_separator()
+project_context_menu.add_command(label="Delete", command=ctx_delete)
+
+file_tree.bind("<Button-3>", on_tree_context_menu)
+
+def add_tooltip(widget, text):
+    tip = tk.Toplevel(widget)
+    tip.withdraw()
+    tip.overrideredirect(True)
+
+    label = tk.Label(
+        tip,
+        text=text,
+        bg=TOOLTIP_BG,
+        fg=TOOLTIP_FG,
+        padx=6,
+        pady=3
+    )
+    label.pack()
+
+    def enter(event):
+        x = widget.winfo_rootx() + 20
+        y = widget.winfo_rooty() + 20
+        tip.geometry(f"+{x}+{y}")
+        tip.deiconify()
+
+    def leave(event):
+        tip.withdraw()
+
+    widget.bind("<Enter>", enter)
+    widget.bind("<Leave>", leave)
+
+
+# =====================
+# 🔎 EDITOR SEARCH BAR
+# =====================
+# --- Search Bar Frame ---
+search_frame = tk.Frame(main_frame, bg=BG_PANEL)
+search_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=(5,0))
+
+# Stretchable spacer to push everything to the right
+spacer = tk.Frame(search_frame, bg=BG_PANEL)
+spacer.pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+# Search variable
+search_var = tk.StringVar()
+
+# --- Buttons first ---
+def make_small_button(parent, text, cmd, tooltip_text, font_size=10):
+    # Enhanced cyberpunk button with advanced neon styling
+    neon_colors = ["#00ffff", "#ff1493", "#ff4500", "#9400d3", "#00ff00", "#ff00ff"]
+    base_color = random.choice(neon_colors)
+    blink_state = {"phase": 0, "color_idx": 0}
+    
+    def on_enter(e):
+        btn.config(bg=base_color, fg="#000000", relief=tk.RAISED, 
+                font=("Courier New", font_size, "bold"), borderwidth=3)
+        
+    def on_leave(e):
+        btn.config(bg=BG_PANEL, fg=base_color, relief=tk.FLAT, 
+                font=("Courier New", font_size), borderwidth=2)
+        
+    def on_click(e):
+        # Intense blink effect on click
+        original_bg = btn.cget("bg")
+        original_fg = btn.cget("fg")
+        btn.config(bg="#ffffff", fg="#000000", relief=tk.SOLID)
+        parent.after(80, lambda: btn.config(bg=original_bg, fg=original_fg, relief=tk.RAISED))
+        
+    btn = tk.Button(
+        parent,
+        text=text,
+        command=cmd,
+        bg=BG_PANEL,
+        fg=base_color,
+        relief=tk.FLAT,
+        padx=8,
+        pady=3,
+        font=("Courier New", font_size, "bold"),
+        activebackground=base_color,
+        activeforeground="#000000",
+        highlightthickness=2,
+        highlightbackground=base_color,
+        borderwidth=2
+    )
+    
+    btn.bind("<Enter>", on_enter)
+    btn.bind("<Leave>", on_leave)
+    btn.bind("<Button-1>", on_click)
+    
+    # Advanced blinking animation system
+    def animate_button_blink():
+        try:
+            phase = blink_state["phase"]
+            color_idx = blink_state["color_idx"]
+            
+            # Create pulsing glow effect
+            if phase % 4 == 0:
+                # Bright flash
+                btn.config(highlightbackground=neon_colors[color_idx])
+            elif phase % 4 == 2:
+                # Dim
+                btn.config(highlightbackground=blend_hex(neon_colors[color_idx], BG_PANEL, 0.3))
+            
+            # Change color periodically
+            if phase % 8 == 0:
+                blink_state["color_idx"] = (color_idx + 1) % len(neon_colors)
+                btn.config(fg=neon_colors[blink_state["color_idx"]])
+            
+            blink_state["phase"] = (phase + 1) % 16
+            
+        except Exception:
+            pass
+        parent.after(150, animate_button_blink)
+    
+    # Start animation if enabled
+    if settings["interactive"]["beeping_lights"]:
+        animate_button_blink()
+    
+    add_tooltip(btn, tooltip_text)
+    return btn
+
+btn_find = make_small_button(search_frame, "🔍", search_code, "Find text in current file (Enter)", font_size=9)
+btn_prev = make_small_button(search_frame, "↑", find_prev, "Find previous match (Shift+F3)", font_size=10)
+btn_next = make_small_button(search_frame, "↓", find_next, "Find next match (F3)", font_size=10)
+btn_clear = make_small_button(search_frame, "✕", clear_search, "Clear search highlights (Esc)", font_size=10)
+# Matrix color and coverage buttons will be added after function definitions
+
+btn_find.pack(side=tk.LEFT, padx=1)
+btn_prev.pack(side=tk.LEFT, padx=1)
+btn_next.pack(side=tk.LEFT, padx=1)
+btn_clear.pack(side=tk.LEFT, padx=1)
+
+# --- Search Entry after buttons ---
+search_entry = tk.Entry(
+    search_frame,
+    textvariable=search_var,
+    bg=BG_MAIN,
+    fg=FG_TEXT,
+    insertbackground=FG_TEXT,
+    relief=tk.FLAT,
+    width=30
+)
+search_entry.pack(side=tk.LEFT, padx=(4,0))
+
+# --- Key bindings ---
+search_entry.bind("<Return>", search_code)
+search_entry.bind("<Escape>", lambda e: clear_search())
+root.bind("<Control-f>", lambda e: search_entry.focus_set())
+root.bind("<F3>", lambda e: find_next())
+root.bind("<Shift-F3>", lambda e: find_prev())
+
+
+
+
+
+
+
+# =====================
+# 📟 TERMINAL PANEL
+# =====================
+class TerminalPanel(tk.Frame):
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.configure(bg=BG_PANEL)
+        
+        # Header with close button
+        self.header = tk.Frame(self, bg="#111111", height=24)
+        self.header.pack(fill=tk.X)
+        
+        tk.Label(self.header, text=" 💻 TERMINAL ", bg="#111111", fg="#00ff00", font=("Consolas", 9, "bold")).pack(side=tk.LEFT)
+        
+        # Output/Input area
+        self.term = scrolledtext.ScrolledText(
+            self,
+            bg="#0c0c0c",
+            fg="#00ff00",
+            insertbackground="#00ff00",
+            font=("Consolas", 10),
+            selectbackground="#003300",
+            height=10
+        )
+        self.term.pack(fill=tk.BOTH, expand=True)
+        self.term.tag_config("error", foreground="#ff5555")  # Red color for stderr
+        
+        self.term.bind("<Return>", self.handle_return)
+        self.term.bind("<Control-c>", self.handle_ctrl_c)
+        self.term.bind("<Up>", self.history_up)
+        self.term.bind("<Down>", self.history_down)
+        self.term.bind("<Key>", self.prevent_edit_history)
+        
+        self.cwd = os.getcwd()
+        
+        # History
+        self.history = []
+        self.history_index = 0
+        self.input_start_mark = "input_start"
+
+        self.show_prompt()
+
+    def set_cwd(self, new_path):
+        """Update terminal CWD and show new prompt"""
+        if os.path.exists(new_path) and os.path.isdir(new_path):
+            self.cwd = new_path
+            self.term.insert(tk.END, f"\n--- Changed CWD to: {new_path} ---\n", "com")
+            self.show_prompt()
+            # Also update the actual process CWD for good measure, although
+            # subprocess.Popen uses self.cwd
+            try:
+                os.chdir(new_path)
+            except Exception:
+                pass
+
+
+    def show_prompt(self):
+        prompt = f"\n{self.cwd}> "
+        self.term.insert(tk.END, prompt)
+        self.term.mark_set(self.input_start_mark, "insert")
+        self.term.mark_gravity(self.input_start_mark, tk.LEFT)
+        self.term.see(tk.END)
+
+    def prevent_edit_history(self, event):
+        # Allow navigation keys
+        if event.keysym in ["Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next"]:
+            return
+        # Check if cursor is before input start
+        try:
+            if self.term.compare("insert", "<", self.input_start_mark):
+                self.term.mark_set("insert", "end")
+        except Exception:
+            pass
+
+    def handle_return(self, event):
+        # Get input
+        try:
+            content = self.term.get(self.input_start_mark, "end-1c")
+            cmd = content.strip()
+            
+            self.term.insert(tk.END, "\n")
+            
+            if cmd:
+                self.history.append(cmd)
+                self.history_index = len(self.history)
+                self.run_command(cmd)
+            else:
+                self.show_prompt()
+        except Exception:
+            self.show_prompt()
+            
+        return "break"
+
+    def history_up(self, event):
+        if self.history and self.history_index > 0:
+            self.history_index -= 1
+            cmd = self.history[self.history_index]
+            self.term.delete(self.input_start_mark, tk.END)
+            self.term.insert(self.input_start_mark, cmd)
+        return "break"
+
+    def history_down(self, event):
+        if self.history and self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            cmd = self.history[self.history_index]
+            self.term.delete(self.input_start_mark, tk.END)
+            self.term.insert(self.input_start_mark, cmd)
+        elif self.history_index == len(self.history) - 1:
+            self.history_index += 1
+            self.term.delete(self.input_start_mark, tk.END)
+        return "break"
+
+    def run_command(self, cmd):
+        # Handle cd specially
+        if cmd.startswith("cd "):
+            path = cmd[3:].strip()
+            # Handle quotes
+            if (path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'")):
+                path = path[1:-1]
+            
+            try:
+                os.chdir(path)
+                self.cwd = os.getcwd()
+            except Exception as e:
+                self.term.insert(tk.END, f"{e}\n", "error")
+            self.show_prompt()
+            return
+
+        # Handle drive change (Windows)
+        if len(cmd) == 2 and cmd[1] == ':' and cmd[0].isalpha():
+            try:
+                os.chdir(cmd)
+                self.cwd = os.getcwd()
+            except Exception as e:
+                self.term.insert(tk.END, f"{e}\n", "error")
+            self.show_prompt()
+            return
+
+        if cmd.lower() in ["cls", "clear"]:
+            self.term.delete("1.0", tk.END)
+            self.show_prompt()
+            return
+
+        # Run external command
+        def target():
+            try:
+                # Use shell=True for Windows commands
+                startupinfo = None
+                if os.name == 'nt':
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                
+                process = subprocess.Popen(
+                    cmd,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=self.cwd,
+                    startupinfo=startupinfo
+                )
+                stdout, stderr = process.communicate()
+                
+                def update_ui():
+                    if stdout:
+                        self.term.insert(tk.END, stdout)
+                    if stderr:
+                        self.term.insert(tk.END, stderr, "error")
+                    self.show_prompt()
+                
+                self.after(0, update_ui)
+                
+            except Exception as e:
+                def show_error():
+                    self.term.insert(tk.END, f"Error: {e}\n", "error")
+                    self.show_prompt()
+                self.after(0, show_error)
+
+        threading.Thread(target=target, daemon=True).start()
+
+    def handle_ctrl_c(self, event):
+        self.term.insert(tk.END, "^C\n")
+        self.show_prompt()
+        return "break"
+
+
+# --- Editor Paned Window (Split Code / Terminal) ---
+editor_paned = tk.PanedWindow(main_frame, orient=tk.VERTICAL, bg=BG_MAIN, sashwidth=4, sashrelief=tk.RAISED)
+editor_paned.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+# --- Code Editor ---
+code_editor = scrolledtext.ScrolledText(
+    editor_paned,
+    font=("Consolas", 12),
+    bg=BG_MAIN,
+    fg=FG_TEXT,
+    insertbackground=FG_TEXT,
+    selectbackground=HIGHLIGHT,
+    relief=tk.FLAT,
+    undo=True,
+    autoseparators=True,
+)
+editor_paned.add(code_editor, stretch="always")
+code_editor.bind("<<Modified>>", on_content_changed)
+
+# --- Editor Context Menu ---
+editor_context_menu = tk.Menu(code_editor, tearoff=0, bg=BG_PANEL, fg=FG_TEXT, activebackground=HIGHLIGHT, activeforeground=FG_TEXT)
+
+def do_editor_cut():
+    try:
+        code_editor.event_generate("<<Cut>>")
+    except Exception:
+        pass
+
+def do_editor_copy():
+    try:
+        code_editor.event_generate("<<Copy>>")
+    except Exception:
+        pass
+
+def do_editor_paste():
+    try:
+        code_editor.event_generate("<<Paste>>")
+    except Exception:
+        pass
+
+def do_editor_select_all():
+    code_editor.tag_add(tk.SEL, "1.0", tk.END)
+    code_editor.mark_set(tk.INSERT, "1.0")
+    code_editor.see(tk.INSERT)
+    return "break"
+
+editor_context_menu.add_command(label="Cut", command=do_editor_cut)
+editor_context_menu.add_command(label="Copy", command=do_editor_copy)
+editor_context_menu.add_command(label="Paste", command=do_editor_paste)
+editor_context_menu.add_separator()
+editor_context_menu.add_command(label="Select All", command=do_editor_select_all)
+
+def show_editor_context_menu(event):
+    try:
+        editor_context_menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        editor_context_menu.grab_release()
+
+code_editor.bind("<Button-3>", show_editor_context_menu)
+
+# --- Terminal ---
+terminal_panel = TerminalPanel(editor_paned)
+editor_paned.add(terminal_panel, stretch="never", height=200)
+
+code_editor.tag_configure(
+    "search_highlight",
+    background="#264f78",
+    foreground="white"
+)
+code_editor.tag_configure("kw", foreground="#c586c0")
+code_editor.tag_configure("str", foreground="#ce9178")
+code_editor.tag_configure("com", foreground="#6a9955")
+code_editor.tag_configure("num", foreground="#b5cea8")
+code_editor.tag_configure("def", foreground="#4fc1ff")
+code_editor.tag_configure("cls", foreground="#4ec9b0")
+code_editor.tag_configure("punct", foreground="#dcdcaa")
+code_editor.tag_configure("tag", foreground="#569cd6")
+code_editor.tag_configure("attr", foreground="#9cdcfe")
+highlight_job = None
+def schedule_highlight(event=None):
+    global highlight_job
+    if highlight_job:
+        try:
+            root.after_cancel(highlight_job)
+        except Exception:
+            pass
+    highlight_job = root.after(150, do_highlight)
+def apply_tag(pattern, tag):
+    text = code_editor.get("1.0", "end-1c")
+    for m in re.finditer(pattern, text, re.MULTILINE):
+        start = f"1.0+{m.start()}c"
+        end = f"1.0+{m.end()}c"
+        code_editor.tag_add(tag, start, end)
+def highlight_python():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    code_editor.tag_remove("def", "1.0", tk.END)
+    code_editor.tag_remove("cls", "1.0", tk.END)
+    str_pat = r"('''[\\s\\S]*?'''|\"\"\"[\\s\\S]*?\"\"\"|'(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\")"
+    com_pat = r"#.*"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_pat = r"\\b(" + "|".join(sorted(set(keyword.kwlist))) + r")\\b"
+    def_pat = r"\\bdef\\s+([A-Za-z_][A-Za-z0-9_]*)"
+    cls_pat = r"\\bclass\\s+([A-Za-z_][A-Za-z0-9_]*)"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+    text = code_editor.get("1.0", "end-1c")
+    for m in re.finditer(def_pat, text):
+        start = f"1.0+{m.start(1)}c"
+        end = f"1.0+{m.end(1)}c"
+        code_editor.tag_add("def", start, end)
+    for m in re.finditer(cls_pat, text):
+        start = f"1.0+{m.start(1)}c"
+        end = f"1.0+{m.end(1)}c"
+        code_editor.tag_add("cls", start, end)
+def highlight_json():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    code_editor.tag_remove("punct", "1.0", tk.END)
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\""
+    num_pat = r"\\b-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b"
+    bool_pat = r"\\b(true|false|null)\\b"
+    punct_pat = r"[\\{\\}\\[\\]\\:,]"
+    apply_tag(str_pat, "str")
+    apply_tag(num_pat, "num")
+    apply_tag(bool_pat, "kw")
+    apply_tag(punct_pat, "punct")
+def highlight_c_cpp():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"
+    com_pat = r"//.*|/\\*[\\s\\S]*?\\*/"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['int','float','double','char','void','long','short','signed','unsigned','const','volatile','static','struct','union','enum','typedef','sizeof','return','if','else','switch','case','default','for','while','do','break','continue','goto','extern','register','class','namespace','template','typename','using','new','delete','public','private','protected','virtual','override','bool','true','false','nullptr']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_dart():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"\"\"\"[\\s\\S]*?\"\"\"|'(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\""
+    com_pat = r"//.*|/\\*[\\s\\S]*?\\*/"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['import','library','part','of','class','enum','typedef','with','extends','implements','mixin','abstract','final','const','var','dynamic','void','int','double','num','bool','String','List','Map','Set','Future','Stream','await','async','yield','return','this','super','new','throw','try','catch','finally','if','else','switch','case','default','for','while','do','break','continue','true','false','null']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_lua():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|\\[(=*)\\[[\\s\\S]*?\\]\\1\\]"
+    com_pat = r"--\\[(=*)\\[[\\s\\S]*?\\]\\1\\]|--.*"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['and','break','do','else','elseif','end','false','for','function','goto','if','in','local','nil','not','or','repeat','return','then','true','until','while']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_js_ts():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|`(?:\\\\.|[^`\\\\])*`"
+    com_pat = r"//.*|/\\*[\\s\\S]*?\\*/"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['function','return','if','else','switch','case','default','for','while','do','break','continue','class','extends','super','this','new','import','export','from','as','let','const','var','try','catch','finally','throw','await','async','yield','true','false','null','undefined']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_html():
+    code_editor.tag_remove("tag", "1.0", tk.END)
+    code_editor.tag_remove("attr", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    com_pat = r"<!--[\\s\\S]*?-->"
+    apply_tag(com_pat, "com")
+    text = code_editor.get("1.0", "end-1c")
+    for m in re.finditer(r"<\\/?([A-Za-z][A-Za-z0-9:-]*)", text):
+        start = f"1.0+{m.start(1)}c"
+        end = f"1.0+{m.end(1)}c"
+        code_editor.tag_add("tag", start, end)
+    for m in re.finditer(r"\\s([A-Za-z_:][A-Za-z0-9_:\\-\\.]*)=", text):
+        start = f"1.0+{m.start(1)}c"
+        end = f"1.0+{m.end(1)}c"
+        code_editor.tag_add("attr", start, end)
+    apply_tag(r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'", "str")
+def highlight_css():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    com_pat = r"/\\*[\\s\\S]*?\\*/"
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?(?:px|em|rem|%|vh|vw)?\\b"
+    kw_list = ['color','background','border','margin','padding','display','position','top','right','bottom','left','width','height','font','font-size','font-weight','line-height','text-align','z-index','flex','grid','align-items','justify-content','content']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(com_pat, "com")
+    apply_tag(str_pat, "str")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_java():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"
+    com_pat = r"//.*|/\\*[\\s\\S]*?\\*/"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['package','import','class','interface','enum','extends','implements','public','private','protected','static','final','abstract','synchronized','volatile','transient','native','strictfp','void','int','long','short','byte','float','double','char','boolean','new','this','super','return','if','else','switch','case','default','for','while','do','break','continue','try','catch','finally','throw','throws','true','false','null']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_go():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|`[^`]*`"
+    com_pat = r"//.*|/\\*[\\s\\S]*?\\*/"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['package','import','func','var','const','type','struct','interface','map','chan','go','defer','return','if','else','switch','case','default','for','range','break','continue','select','true','false','nil']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_rust():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"
+    com_pat = r"//.*|/\\*[\\s\\S]*?\\*/"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['fn','let','mut','const','static','struct','enum','impl','trait','type','use','mod','pub','crate','super','self','return','if','else','match','loop','while','for','break','continue','as','ref','move','box','where','async','await','unsafe','true','false','None','Some']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def highlight_yaml():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    com_pat = r"#.*"
+    str_pat = r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"
+    num_pat = r"\\b-?\\d+(?:\\.\\d+)?\\b"
+    bool_pat = r"\\b(true|false|null)\\b"
+    key_pat = r"(?m)^\\s*([A-Za-z0-9_\\-\\.]+)\\s*:"
+    apply_tag(com_pat, "com")
+    apply_tag(str_pat, "str")
+    apply_tag(num_pat, "num")
+    apply_tag(bool_pat, "kw")
+    text = code_editor.get("1.0", "end-1c")
+    for m in re.finditer(key_pat, text):
+        start = f"1.0+{m.start(1)}c"
+        end = f"1.0+{m.end(1)}c"
+        code_editor.tag_add("attr", start, end)
+def highlight_xml():
+    code_editor.tag_remove("tag", "1.0", tk.END)
+    code_editor.tag_remove("attr", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    com_pat = r"<!--[\\s\\S]*?-->"
+    apply_tag(com_pat, "com")
+    text = code_editor.get("1.0", "end-1c")
+    for m in re.finditer(r"<\\/?([A-Za-z_][A-Za-z0-9_:\\-\\.]*)", text):
+        start = f"1.0+{m.start(1)}c"
+        end = f"1.0+{m.end(1)}c"
+        code_editor.tag_add("tag", start, end)
+    for m in re.finditer(r"\\s([A-Za-z_:][A-Za-z0-9_:\\-\\.]*)=", text):
+        start = f"1.0+{m.start(1)}c"
+        end = f"1.0+{m.end(1)}c"
+        code_editor.tag_add("attr", start, end)
+    apply_tag(r"\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'", "str")
+def highlight_csharp():
+    code_editor.tag_remove("kw", "1.0", tk.END)
+    code_editor.tag_remove("str", "1.0", tk.END)
+    code_editor.tag_remove("com", "1.0", tk.END)
+    code_editor.tag_remove("num", "1.0", tk.END)
+    str_pat = r"@\"[^\"]*\"|\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"
+    com_pat = r"//.*|/\\*[\\s\\S]*?\\*/"
+    num_pat = r"\\b\\d+(?:\\.\\d+)?\\b"
+    kw_list = ['namespace','using','class','struct','interface','enum','public','private','protected','internal','static','readonly','const','abstract','virtual','override','sealed','partial','async','await','new','this','base','return','if','else','switch','case','default','for','foreach','while','do','break','continue','try','catch','finally','throw','true','false','null','var','dynamic','void','int','long','short','byte','float','double','decimal','char','string','bool']
+    kw_pat = r"\\b(" + "|".join(kw_list) + r")\\b"
+    apply_tag(str_pat, "str")
+    apply_tag(com_pat, "com")
+    apply_tag(num_pat, "num")
+    apply_tag(kw_pat, "kw")
+def do_highlight():
+    ext = os.path.splitext(current_file)[1].lower() if current_file else ".py"
+    if ext == ".py":
+        highlight_python()
+    elif ext == ".json":
+        highlight_json()
+    elif ext in (".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"):
+        highlight_c_cpp()
+    elif ext in (".dart",):
+        highlight_dart()
+    elif ext in (".lua",):
+        highlight_lua()
+    elif ext in (".js", ".jsx", ".ts", ".tsx"):
+        highlight_js_ts()
+    elif ext in (".html", ".htm"):
+        highlight_html()
+    elif ext in (".css",):
+        highlight_css()
+    elif ext in (".java",):
+        highlight_java()
+    elif ext in (".go",):
+        highlight_go()
+    elif ext in (".rs",):
+        highlight_rust()
+    elif ext in (".yml", ".yaml"):
+        highlight_yaml()
+    elif ext in (".xml",):
+        highlight_xml()
+    elif ext in (".cs",):
+        highlight_csharp()
+    else:
+        code_editor.tag_remove("kw", "1.0", tk.END)
+        code_editor.tag_remove("str", "1.0", tk.END)
+        code_editor.tag_remove("com", "1.0", tk.END)
+        code_editor.tag_remove("num", "1.0", tk.END)
+        code_editor.tag_remove("def", "1.0", tk.END)
+        code_editor.tag_remove("cls", "1.0", tk.END)
+        code_editor.tag_remove("punct", "1.0", tk.END)
+        code_editor.tag_remove("tag", "1.0", tk.END)
+        code_editor.tag_remove("attr", "1.0", tk.END)
+code_editor.bind("<KeyRelease>", schedule_highlight)
+
+accent_file_left = None
+accent_file_right = None
+accent_editor_top = None
+accent_editor_bottom = None
+accent_editor_left = None
+accent_editor_right = None
+accent_phase = 0
+def setup_accent_lights():
+    global accent_file_left, accent_file_right, accent_editor_top, accent_editor_bottom, accent_editor_left, accent_editor_right
+    if accent_file_left is None:
+        accent_file_left = tk.Canvas(file_frame, width=4, bg=BG_PANEL, highlightthickness=0)
+        accent_file_left.place(relx=0, rely=0, relheight=1, width=4)
+    if accent_file_right is None:
+        accent_file_right = tk.Canvas(file_frame, width=4, bg=BG_PANEL, highlightthickness=0)
+        accent_file_right.place(relx=1.0, rely=0, anchor="ne", relheight=1, width=4)
+    if accent_editor_top is None:
+        accent_editor_top = tk.Canvas(main_frame, height=3, bg=BG_MAIN, highlightthickness=0)
+        accent_editor_top.place(in_=code_editor, relx=0, rely=0, relwidth=1, height=3)
+    if accent_editor_bottom is None:
+        accent_editor_bottom = tk.Canvas(main_frame, height=3, bg=BG_MAIN, highlightthickness=0)
+        accent_editor_bottom.place(in_=code_editor, relx=0, rely=1.0, anchor="sw", relwidth=1, height=3)
+    if accent_editor_left is None:
+        accent_editor_left = tk.Canvas(main_frame, width=3, bg=BG_MAIN, highlightthickness=0)
+        accent_editor_left.place(in_=code_editor, relx=0, rely=0, width=3, relheight=1)
+    if accent_editor_right is None:
+        accent_editor_right = tk.Canvas(main_frame, width=3, bg=BG_MAIN, highlightthickness=0)
+        accent_editor_right.place(in_=code_editor, relx=1.0, rely=0, anchor="ne", width=3, relheight=1)
+
+def animate_accent_lights():
+    global accent_phase
+    # Darker neon palette for lower intensity
+    palette = ["#007a85", "#851225", "#520085", "#008535"]
+    color = palette[accent_phase % len(palette)]
+    if accent_file_left:
+        accent_file_left.configure(bg=color)
+    if accent_file_right:
+        accent_file_right.configure(bg=color)
+    if accent_editor_top:
+        accent_editor_top.configure(bg=color)
+    if accent_editor_bottom:
+        accent_editor_bottom.configure(bg=color)
+    if accent_editor_left:
+        accent_editor_left.configure(bg=color)
+    if accent_editor_right:
+        accent_editor_right.configure(bg=color)
+    accent_phase = (accent_phase + 1) % 64
+    if settings["interactive"]["beeping_lights"]:
+        root.after(180, animate_accent_lights)
+    else:
+        root.after(400, animate_accent_lights)
+
+# Manual repositioning functions removed - using place(in_=...) handles geometry automatically
+root.after(200, setup_accent_lights)
+root.after(400, animate_accent_lights)
+
+neon_text_ids = {}
+header_logo_img = None  # Global reference to prevent GC
+
+def draw_neon_logo(target_width=None):
+    global header_logo_img
+    # Clean up logo elements only, preserving matrix rain
+    logo_canvas.delete("logo_part")
+    
+    # Also clean up any notification text that might be lingering
+    logo_canvas.delete("color_notify")
+    logo_canvas.delete("coverage_notify")
+    
+    w = target_width if target_width is not None else logo_canvas.winfo_width()
+    if w <= 1: w = 1700  # Fallback if window not ready
+    mid = w // 2
+
+    # Load and Draw Background Image/Logo
+    try:
+        if header_logo_img is None:
+            if getattr(sys, 'frozen', False):
+                # Running in a PyInstaller bundle
+                base_path = sys._MEIPASS
+            else:
+                # Running in a normal Python environment
+                base_path = os.path.dirname(os.path.abspath(__file__))
+
+            img_path = os.path.join(base_path, "images", "Rogue_Agent_Editor_1.png")
+            if os.path.exists(img_path):
+                # Load image
+                base_img = tk.PhotoImage(file=img_path)
+                # Scale down: subsample(x, y) - takes every x-th pixel
+                # Original is likely large, let's try 3 or 4 to fit 90px height
+                header_logo_img = base_img.subsample(5, 5) 
+                
+                # Set App Icon
+                try:
+                   root.iconphoto(True, header_logo_img)
+                except Exception:
+                   pass
+        
+        if header_logo_img:
+            # Draw centered in the header
+            # Canvas center is (mid, 45)
+            logo_canvas.create_image(110, 45, image=header_logo_img, tags=("logo_bg", "logo_part"))
+    except Exception as e:
+        print(f"Failed to load logo image: {e}")
+    
+    # Main Title - "Rogue Agent Editor"
+    main_title = "ROGUE AGENT Editor"
+    base_font = ("Orbitron", 32, "bold")  # Slightly smaller to fit better with logo
+    fallback_font = ("Courier New", 32, "bold")
+    
+    # Essential cyberpunk colors - DIMMED for less intensity
+    neon_cyan = "#008888"
+    neon_pink = "#b30e66"
+    neon_orange = "#b33000"
+    neon_violet = "#600080"
+    
+    x = mid
+    y = 45  # Centered in header
+    
+    # Multiple glow layers for depth - SOLID COLORS ONLY (No stipple to avoid white box artifacts)
+    glow_colors = [neon_pink, neon_orange, neon_violet]
+    # Simple solid offsets for "glitch" look without transparency artifacts
+    glow_offsets = [(-2, -2), (2, 2), (-1, 1)] 
+    
+    for i in range(len(glow_offsets)):
+        offset_x, offset_y = glow_offsets[i]
+        color = glow_colors[i % len(glow_colors)]
+        tag_name = f"logo_glow_{i}"
+        logo_canvas.create_text(x+offset_x, y+offset_y, text=main_title, fill=color, 
+                           font=fallback_font, tags=(tag_name, "logo_part", "logo_text"))
+    
+    # Main title
+    logo_canvas.create_text(x, y, text=main_title, fill=neon_cyan, 
+                       font=fallback_font, tags=("logo_main", "logo_part", "logo_text"))
+    
+    # Ensure logo is above matrix rain
+    logo_canvas.tag_raise("logo_part")
+
+def animate_neon():
+    try:
+        # Subtle glitch effect for main title
+        if random.random() < 0.05:
+            offset = random.randint(-1, 1)
+            # Move the entire text group (glows + main)
+            logo_canvas.move("logo_text", offset, 0)
+            # Restore position after brief delay using relative move
+            logo_canvas.after(40, lambda: logo_canvas.move("logo_text", -offset, 0))
+        
+        # Smooth color cycling for main title
+        phase = (time.time() * 0.3) % 1.0
+        if phase < 0.25:
+            color = "#008888"  # Dark Cyan
+        elif phase < 0.5:
+            color = "#b30e66"  # Dark Pink  
+        elif phase < 0.75:
+            color = "#b33000"  # Dark Orange
+        else:
+            color = "#600080"  # Dark Violet
+        
+        logo_canvas.itemconfig("logo_main", fill=color)
+            
+    except Exception:
+        pass
+    logo_canvas.after(100, animate_neon)
+
+# Removed animate_left_header as it's merged into animate_neon/draw_neon_logo
+def master_logo_resize(event):
+    # Order matters: Matrix Rain first (background), then Logo (foreground), then Scanlines (overlay)
+    # Using event.width ensures we are responsive to the actual new size immediately
+    init_matrix(event.width)
+    draw_neon_logo(event.width)
+    draw_scanlines()
+
+# Bind ONLY the master resize handler
+logo_canvas.bind("<Configure>", master_logo_resize)
+draw_neon_logo()
+animate_neon()
+
+# Removed redundant individual handlers to prevent overwrite conflicts
+# on_logo_resize and on_logo_scan_resize are replaced by master_logo_resize
+
+
+
+matrix_overlay_window = None
+matrix_overlay_canvas = None
+matrix_streams = []
+matrix_full_streams = []
+matrix_color_schemes = {
+    "classic_green": {"colors": ["#00ff00", "#00cc00", "#009900"], "name": "Classic Matrix Green"},
+    "neon_blue": {"colors": ["#00ffff", "#00cccc", "#0099ff"], "name": "Neon Blue"},
+    "cyber_purple": {"colors": ["#ff00ff", "#cc00cc", "#9900ff"], "name": "Cyber Purple"},
+    "blade_runner": {"colors": ["#ff4500", "#ff1493", "#9400d3"], "name": "Blade Runner"},
+    "rainbow": {"colors": ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff"], "name": "Rainbow"},
+    "terminal": {"colors": ["#00ff00", "#00cc00", "#ff0000"], "name": "Terminal"},
+    "blood_red": {"colors": ["#ff0000", "#cc0000", "#990000"], "name": "Blood Red"},
+    "golden_eye": {"colors": ["#ffd700", "#ffb90f", "#daa520"], "name": "Golden Eye"},
+    "ghost_white": {"colors": ["#ffffff", "#e0e0e0", "#b0b0b0"], "name": "Ghost White"},
+    "pink_floyd": {"colors": ["#ff69b4", "#ff1493", "#c71585"], "name": "Pink Floyd"},
+    "ocean_breeze": {"colors": ["#00FFFF", "#00BFFF", "#1E90FF"], "name": "Ocean Breeze"},
+    "sunset_glow": {"colors": ["#FF4500", "#FF8C00", "#FFD700"], "name": "Sunset Glow"},
+    "toxic_waste": {"colors": ["#7FFF00", "#32CD32", "#006400"], "name": "Toxic Waste"},
+    "glitch_art": {"colors": ["#FF00FF", "#00FFFF", "#FFFF00"], "name": "Glitch Art"},
+    "cyber_punk": {"colors": ["#FCEE09", "#00F0FF", "#FF003C"], "name": "Cyberpunk 2077"},
+    "matrix_reloaded": {"colors": ["#0D0208", "#003B00", "#008F11"], "name": "Matrix Reloaded"},
+    "fire_storm": {"colors": ["#FF4500", "#FF8C00", "#FFD700"], "name": "Fire Storm"},
+    "ice_age": {"colors": ["#E0FFFF", "#00FFFF", "#ADD8E6"], "name": "Ice Age"}
+}
+current_matrix_scheme = "classic_green"
+
+def ensure_matrix_canvas():
+    global matrix_overlay_window, matrix_overlay_canvas
+    if settings["matrix"]["coverage"] == "full":
+        if matrix_overlay_window is None:
+            # Create a Toplevel for the overlay
+            matrix_overlay_window = tk.Toplevel(root)
+            matrix_overlay_window.overrideredirect(True)
+            # Use a specific color for transparency key
+            trans_color = "#010001" 
+            matrix_overlay_window.configure(bg=trans_color)
+            matrix_overlay_window.wm_attributes("-transparentcolor", trans_color)
+            matrix_overlay_window.wm_attributes("-topmost", True)
+            
+            # Sync geometry with root
+            def sync_geometry(e=None):
+                if matrix_overlay_window:
+                    try:
+                        x = root.winfo_rootx()
+                        y = root.winfo_rooty()
+                        w = root.winfo_width()
+                        h = root.winfo_height()
+                        # Fallback width/height safety
+                        if w <= 1: w = 1200
+                        if h <= 1: h = 800
+                        matrix_overlay_window.geometry(f"{w}x{h}+{x}+{y}")
+                    except Exception:
+                        pass
+            
+            root.bind("<Configure>", sync_geometry, add="+")
+            sync_geometry()
+            
+            matrix_overlay_canvas = tk.Canvas(matrix_overlay_window, bg=trans_color, highlightthickness=0)
+            matrix_overlay_canvas.pack(fill="both", expand=True)
+            
+            # Ensure clicks pass through (on Windows, transparent color usually handles this, 
+            # but we can also set the window to be 'transparent' to mouse if needed, 
+            # though standard transparentcolor is usually enough for visual overlay).
+            
+    else:
+        if matrix_overlay_window:
+            try:
+                matrix_overlay_window.destroy()
+            except Exception:
+                pass
+            matrix_overlay_window = None
+            matrix_overlay_canvas = None
+
+def init_matrix(target_width=None):
+    ensure_matrix_canvas()
+    
+    # Only clean up matrix elements, not all elements
+    logo_canvas.delete("matrix")
+    matrix_streams.clear()
+    
+    w_head = target_width if target_width is not None else logo_canvas.winfo_width()
+    if w_head <= 1: w_head = 1700
+    h_head = logo_canvas.winfo_height()
+    if h_head <= 1: h_head = 90
+    
+    # Enhanced matrix with cyberpunk characters
+    matrix_chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ"
+    
+    # Get current color scheme
+    scheme = matrix_color_schemes.get(current_matrix_scheme, matrix_color_schemes["classic_green"])
+    
+    # Header matrix streams (optimized density)
+    col_spacing = 35  # Wider spacing for better performance
+    cols_head = max(8, w_head // col_spacing)  # Fewer columns
+    
+    # Reduced density for performance
+    density = 1  # Fixed to 1 stream per column
+    
+    for i in range(cols_head):
+        x = i * col_spacing + 20
+        y = random.randint(-h_head, h_head)
+        speed = random.randint(3, 5)  # Moderate speed
+        length = random.randint(4, 8)  # Shorter streams
+        
+        # Simple stream creation
+        stream_text_list = [random.choice(matrix_chars) for _ in range(length)]
+        stream_text = "\n".join(stream_text_list)
+        head_color = scheme["colors"][0]
+        
+        tid = logo_canvas.create_text(x, y, text=stream_text, fill=head_color, 
+                                    font=("Consolas", 8), anchor="n", tags=("matrix",))
+        matrix_streams.append({"id": tid, "x": x, "y": y, "s": speed, "l": length, "chars": stream_text_list})
+
+    # Optimized full overlay streams
+    if settings["matrix"]["coverage"] == "full" and matrix_overlay_canvas:
+        matrix_overlay_canvas.delete("all")
+        matrix_full_streams.clear()
+        
+        w = root.winfo_width()
+        if w <= 1: w = 1200
+        h = root.winfo_height()
+        if h <= 1: h = 800
+        
+        cols_full = max(12, w // col_spacing)  # Much fewer columns for performance
+        
+        for i in range(cols_full):
+            x = i * col_spacing + 20
+            for _ in range(density):
+                y = random.randint(-h, h)
+                speed = random.randint(4, 6)
+                length = random.randint(6, 12)
+                
+                stream_text_list = [random.choice(matrix_chars) for _ in range(length)]
+                stream_text = "\n".join(stream_text_list)
+                color = scheme["colors"][0]  # Use primary color only
+                
+                tid = matrix_overlay_canvas.create_text(x, y, text=stream_text, fill=color, 
+                                                   font=("Consolas", 7), anchor="n", tags=("matrix_full",))
+                matrix_full_streams.append({"id": tid, "x": x, "y": y, "s": speed, "l": length, "chars": stream_text_list})
+
+def animate_matrix():
+    try:
+        chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*()"
+        
+        # Animate Header
+        h_head = logo_canvas.winfo_height()
+        if h_head <= 1: h_head = 90
+        
+        for s in matrix_streams:
+            s["y"] += s["s"]
+            if s["y"] > h_head + (s["l"] * 15):
+                s["y"] = - (s["l"] * 15)
+                s["s"] = random.randint(2, 5)
+            logo_canvas.coords(s["id"], s["x"], s["y"])
+            if random.random() < 0.05:
+                # Use cached chars to avoid slow itemcget
+                if "chars" in s:
+                    idx = random.randint(0, len(s["chars"])-1)
+                    s["chars"][idx] = random.choice(chars)
+                    logo_canvas.itemconfig(s["id"], text="\n".join(s["chars"]))
+        
+        # Animate Full Overlay
+        if settings["matrix"]["coverage"] == "full" and matrix_overlay_canvas:
+            h_full = matrix_overlay_window.winfo_height() if matrix_overlay_window else 800
+            for s in matrix_full_streams:
+                s["y"] += s["s"]
+                if s["y"] > h_full + (s["l"] * 15):
+                    s["y"] = - (s["l"] * 15)
+                    s["s"] = random.randint(3, 6)
+                
+                matrix_overlay_canvas.coords(s["id"], s["x"], s["y"])
+                
+                if random.random() < 0.05:
+                    if "chars" in s:
+                        idx = random.randint(0, len(s["chars"])-1)
+                        s["chars"][idx] = random.choice(chars)
+                        matrix_overlay_canvas.itemconfig(s["id"], text="\n".join(s["chars"]))
+                        
+    except Exception:
+        pass
+        
+    interval = int(1000 / max(24, settings["performance"]["fps"]))
+    logo_canvas.after(interval, animate_matrix)
+def on_logo_ready(event=None):
+    init_matrix()
+logo_canvas.bind("<Map>", on_logo_ready)
+animate_matrix()
+
+crt_animating = False
+scanline_offset = 0
+def draw_scanlines():
+    # Header scanlines
+    logo_canvas.delete("scanline")
+    
+    # FIX: Respect CRT setting for header
+    if settings["crt"]["enabled"]:
+        w_head = logo_canvas.winfo_width()
+        if w_head <= 1: w_head = 1700
+        h_head = logo_canvas.winfo_height()
+        if h_head <= 1: h_head = 90
+        
+        intensity = settings["crt"]["intensity"]
+        step = max(2, int(6 - int(4*intensity)))
+        y = scanline_offset % step
+        while y < h_head:
+            logo_canvas.create_line(0, y, w_head, y, fill="#111111", width=1, tags=("scanline",))
+            y += step
+
+        
+    # Full Editor scanlines on Overlay
+    if settings["crt"]["enabled"] and matrix_overlay_canvas:
+        matrix_overlay_canvas.delete("scanline_full")
+        wf = matrix_overlay_window.winfo_width() if matrix_overlay_window else 1200
+        hf = matrix_overlay_window.winfo_height() if matrix_overlay_window else 800
+        
+        # We need to draw semi-transparent lines. Canvas lines don't support alpha directly.
+        # But we are on a transparent window. Dark lines will look like scanlines.
+        yf = scanline_offset % (step * 2) 
+        while yf < hf:
+            matrix_overlay_canvas.create_line(0, yf, wf, yf, fill="#0a0a0a", width=1, tags=("scanline_full",))
+            yf += (step * 2)
+def animate_scanlines():
+    global scanline_offset
+    scanline_offset = (scanline_offset + 1) % 4
+    if (settings["crt"]["enabled"] or crt_animating) and settings["crt"]["scanlines"]:
+        draw_scanlines()
+    logo_canvas.after(80, animate_scanlines)
+
+draw_scanlines()
+animate_scanlines()
+
+# Redundant handler removed - master_logo_resize handles this now
+# def on_logo_scan_resize(event=None):
+#    draw_scanlines()
+# logo_canvas.bind("<Configure>", on_logo_scan_resize)
+# draw_scanlines() -> moved to main init block
+# animate_scanlines() -> moved to main init block
+
+# Removed redundant crt_animating = False here as it's moved up.
+def animate_crt_to(target, duration_ms=None):
+    global crt_animating
+    if duration_ms is None:
+        duration_ms = settings["crt"]["transition_ms"]
+    current = settings["crt"]["intensity"]
+    if abs(target - current) < 1e-6:
+        settings["crt"]["intensity"] = target
+        return
+    steps = max(1, int(duration_ms // 30))
+    delta = (target - current) / steps
+    crt_animating = True
+    def step(i=0, val=current):
+        nv = val + delta
+        settings["crt"]["intensity"] = nv
+        draw_scanlines()
+        if i + 1 < steps:
+            root.after(30, step, i + 1, nv)
+        else:
+            settings["crt"]["intensity"] = target
+            crt_animating = False
+            draw_scanlines()
+    step()
+    
+    # Ensure CRT is completely off when disabled
+    if not settings["crt"]["enabled"] and crt_animating:
+        crt_animating = False
+        draw_scanlines()  # Clear any remaining scanlines
+
+def apply_quality():
+    q = settings["performance"]["quality"]
+    if q == "low":
+        settings["performance"]["fps"] = 24
+        settings["matrix"]["density_per_column"] = 1
+        settings["crt"]["intensity"] = 0.15
+        # Disable heavy effects
+        settings["crt"]["scanlines"] = False
+    elif q == "high":
+        settings["performance"]["fps"] = 60
+        settings["matrix"]["density_per_column"] = 2 # Capped at 2 as per user request
+        settings["crt"]["intensity"] = 0.7
+        settings["crt"]["scanlines"] = True
+    else:
+        settings["performance"]["fps"] = 40
+        settings["matrix"]["density_per_column"] = 1
+        settings["crt"]["intensity"] = 0.4
+        settings["crt"]["scanlines"] = True
+    init_matrix()
+    draw_scanlines()
+
+def toggle_matrix_color():
+    """Cycle through different matrix color schemes."""
+    global current_matrix_scheme
+    schemes = list(matrix_color_schemes.keys())
+    current_index = schemes.index(current_matrix_scheme) if current_matrix_scheme in schemes else 0
+    next_index = (current_index + 1) % len(schemes)
+    current_matrix_scheme = schemes[next_index]
+    
+    # Show notification
+    scheme_name = matrix_color_schemes[current_matrix_scheme]["name"]
+    logo_canvas.delete("color_notify")
+    logo_canvas.create_text(logo_canvas.winfo_width()//2, 25, 
+                           text=f"Matrix: {scheme_name}", 
+                           fill=matrix_color_schemes[current_matrix_scheme]["colors"][0],
+                           font=("Courier New", 10, "bold"), 
+                           tags=("color_notify",))
+    logo_canvas.after(2000, lambda: logo_canvas.delete("color_notify"))
+    
+    # Reinitialize matrix with new colors
+    init_matrix()
+
+def toggle_matrix_coverage():
+    """Toggle between header-only and full-screen matrix."""
+    if settings["matrix"]["coverage"] == "header":
+        settings["matrix"]["coverage"] = "full"
+    else:
+        settings["matrix"]["coverage"] = "header"
+    
+    # Reinitialize matrix
+    init_matrix()
+    
+    # Show notification
+    coverage_text = "FULL" if settings["matrix"]["coverage"] == "full" else "HEADER"
+    logo_canvas.delete("coverage_notify")
+    logo_canvas.create_text(logo_canvas.winfo_width()//2, 35, 
+                           text=f"Matrix: {coverage_text}", 
+                           fill="#00ffff",
+                           font=("Courier New", 10, "bold"), 
+                           tags=("coverage_notify",))
+    logo_canvas.after(2000, lambda: logo_canvas.delete("coverage_notify"))
+ascii_items = []
+ascii_index = 0
+
+# Add matrix control buttons after function definitions
+try:
+    btn_matrix_color = make_small_button(search_frame, "COLOR", toggle_matrix_color, "Cycle Matrix Color Scheme", font_size=9)
+    btn_matrix_full = make_small_button(search_frame, "FULL", toggle_matrix_coverage, "Toggle Full Screen Matrix", font_size=9)
+    btn_matrix_color.pack(side=tk.LEFT, padx=1)
+    btn_matrix_full.pack(side=tk.LEFT, padx=1)
+except Exception:
+    pass
+
+def open_selected_file(path=None):
+    global current_file, prev_file, file_tree, file_map, file_modified
+    
+    # Check for unsaved changes before switching files
+    if not check_unsaved_changes():
+        return
+
+    try:
+        full_path = path
+        if not full_path:
+            sel = file_tree.selection()
+            if not sel:
+                return
+            rel_path = sel[0].rstrip(os.sep)
+            full_path = file_map.get(rel_path)
+            if not full_path:
+                return
+        
+        prev_file = current_file
+        current_file = full_path
+    except Exception as e:
+        log_error(f"Error resolving file selection: {str(e)}")
+        if path: return
+        pass
+    # Preserve editor view and caret if reloading same file
+    try:
+        ystart = code_editor.yview()[0]
+        caret = code_editor.index("insert")
+    except Exception:
+        ystart = None
+        caret = None
+    
+    # Check for media files
+    ext = os.path.splitext(full_path)[1].lower()
+    media_types = {
+        '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.gif': 'image', '.bmp': 'image',
+        '.mp3': 'audio', '.wav': 'audio', '.ogg': 'audio',
+        '.mp4': 'video', '.avi': 'video', '.mkv': 'video', '.mov': 'video'
+    }
+    
+    if ext in media_types:
+        media_type = media_types[ext]
+        code_editor.delete("1.0", tk.END)
+        code_editor.insert(tk.END, f"\n\n    [ {media_type.upper()} FILE DETECTED ]\n")
+        code_editor.insert(tk.END, f"    File: {os.path.basename(full_path)}\n")
+        code_editor.insert(tk.END, f"    Path: {full_path}\n\n")
+        
+        # Add buttons/links to open external
+        btn_text = "    ▶ CLICK HERE TO OPEN IN DEFAULT VIEWER"
+        code_editor.insert(tk.END, btn_text)
+        
+        # Tag the button text to make it clickable
+        start_index = code_editor.search(btn_text, "1.0", tk.END)
+        if start_index:
+            end_index = f"{start_index}+{len(btn_text)}c"
+            code_editor.tag_add("open_media", start_index, end_index)
+            code_editor.tag_config("open_media", foreground="#00ff00", underline=True)
+            code_editor.tag_bind("open_media", "<Button-1>", lambda e: os.startfile(full_path))
+            
+        code_editor.edit_reset()
+        schedule_highlight() # Might need to disable highlighting for this view
+        
+        file_modified = False
+        update_title()
+        code_editor.edit_modified(False)
+        return
+
+    content = ""
+    for enc in ["utf-8", "utf-16", "latin-1"]:
+        try:
+            with open(full_path, "r", encoding=enc) as f:
+                content = f.read()
+            break
+        except Exception:
+            continue
+    if not content:
+        content = f"# Error loading file: {full_path}"
+        log_error(f"Failed to load file: {full_path}")
+    code_editor.delete("1.0", tk.END)
+    code_editor.insert(tk.END, content)
+    code_editor.edit_reset()
+    # Restore view and caret
+    if prev_file == current_file:
+        try:
+            if ystart is not None:
+                code_editor.yview_moveto(ystart)
+            if caret:
+                code_editor.mark_set("insert", caret)
+        except Exception:
+            pass
+    schedule_highlight()
+    
+    file_modified = False
+    update_title()
+    code_editor.edit_modified(False)
+
+def on_file_tree_select(event):
+    if file_tree_updating:
+        # Skip handling selection events triggered during tree refresh
+        update_path_label_for_selection()
+        return
+    sel = file_tree.selection()
+    if not sel:
+        return
+    iid = sel[0]
+    tags = file_tree.item(iid, "tags")
+    if "file" in tags:
+        # Check if the selected file is already the current file
+        # The iid in the tree is built as the relative path (see insert_node)
+        # We need to reconstruct the full path to check against current_file
+        rel_path = iid.rstrip(os.sep)
+        full_path = file_map.get(rel_path)
+        
+        # Prevent reloading if it's the same file to avoid losing unsaved changes
+        # This fixes the "disappearing text" bug caused by auto-refresh
+        if full_path and current_file and os.path.normpath(full_path) == os.path.normpath(current_file):
+            update_path_label_for_selection()
+            return
+            
+        open_selected_file()
+    update_path_label_for_selection()
+file_tree.bind("<<TreeviewSelect>>", on_file_tree_select)
+def open_first_search_match(event=None):
+    # Open the first visible file in the current filtered tree
+    def find_first_file(parent=""):
+        for iid in file_tree.get_children(parent):
+            tags = file_tree.item(iid, "tags")
+            if "file" in tags:
+                return iid
+            child = find_first_file(iid)
+            if child:
+                return child
+        return None
+    first = find_first_file("")
+    if first:
+        try:
+            file_tree.selection_set(first)
+            file_tree.see(first)
+            open_selected_file()
+            update_path_label_for_selection()
+        except Exception:
+            pass
+file_search_entry.bind("<Return>", open_first_search_match)
+
+
+# =====================
+# 🔘 BUTTON FUNCTIONS
+# =====================
+def open_project_folder():
+    global BASE_DIR, QUEUE_FILE
+    selected = filedialog.askdirectory(title="Select Rogue Agent Root Folder")
+    if not selected:
+        return
+    BASE_DIR = selected
+    QUEUE_FILE = os.path.join(BASE_DIR, "agent_queue.json")
+    global SETTINGS_FILE
+    SETTINGS_FILE = os.path.join(BASE_DIR, "rogue_settings.json")
+    load_settings()
+    scan_project_files()
+    refresh_file_list()
+    refresh_queue_viewer()
+    show_info_log("Rogue Agent", "Project loaded successfully")
+    
+    # Update Terminal CWD
+    if 'terminal_panel' in globals():
+        terminal_panel.set_cwd(BASE_DIR)
+
+def save_as_file():
+    global current_file
+    ext = os.path.splitext(current_file)[1] if current_file else ".py"
+    new_path = filedialog.asksaveasfilename(
+        title="Save As",
+        initialdir=BASE_DIR if BASE_DIR else os.getcwd(),
+        defaultextension=ext
+    )
+    if not new_path:
+        return
+    try:
+        with open(new_path, "w", encoding="utf-8") as f:
+            f.write(code_editor.get("1.0", tk.END))
+        current_file = new_path
+        scan_project_files()
+        refresh_file_list()
+        show_info_log("Rogue Agent", f"Saved as: {current_file}")
+    except Exception as e:
+        show_error_log("Rogue Agent", f"Failed Save As:\n{e}")
+
+def undo_editor():
+    try:
+        code_editor.edit_undo()
+    except tk.TclError:
+        # Stack is empty
+        show_info_log("Rogue Agent", "Nothing to undo.")
+
+def redo_editor():
+    try:
+        code_editor.edit_redo()
+    except tk.TclError:
+        # Stack is empty
+        show_info_log("Rogue Agent", "Nothing to redo.")
+
+def rogue_agent_guide():
+    """Copy a detailed Agentic-ready guide JSON to the clipboard for AI Browsers"""
+    guide_json = {
+        "editor_name": "Rogue Agent Editor",
+        "version": "1.2",
+        "description": (
+            "Rogue Agent Editor is an agentic code editor with comprehensive file system management. "
+            "AI-generated tasks can be queued, reviewed, edited, and executed safely in JSON format. "
+            "Supports multi-file projects, file/folder operations, conflict resolution, undo/redo, "
+            "clean review popups, and task execution with user safety controls."
+        ),
+        "capabilities": [
+            "Load and edit project files via hierarchical tree with search and dynamic extension filters",
+            "Create new files and folders with content",
+            "Rename files and folders with confirmation (UI Context Menu & JSON)",
+            "Move files and folders between directories",
+            "Copy files and folders with conflict handling",
+            "Duplicate files and folders via Context Menu",
+            "Delete files and folders with safety confirmation",
+            "Bulk Operations: Shift-Select in Project Tree to Delete, Copy, Paste, or Duplicate multiple files",
+            "Unsaved Changes Indicator: Dot (●) in title bar and 'Ask to Save' on close",
+            "Manage a JSON queue of AI tasks with multiple operation types",
+            "Execute queued tasks (file operations + shell commands) with overwrite default for write operations",
+            "Clean review popup: edit suggested code and Apply to File or Save to Queue",
+            "Handle file conflicts with user-defined resolution strategies",
+            "Provide metadata and error reporting per task",
+            "Support project-wide search with highlight and navigation",
+            "Track dependencies and context for each queued task",
+            "Generate short and full project reports for AI context",
+            "Enforce path safety to prevent operations outside project directory",
+            "Syntax highlighting for major languages: py, json, c/cpp, dart, lua, js/ts, html, css, java, go, rs, yml/yaml, xml, cs",
+            "Integrated multi-language terminal with command history and error highlighting"
+        ],
+        "ui_behavior": {
+            "project_tree": "Folders preserved across refresh; selection and scroll maintained; search filters tree in real-time; Right-click context menu for Rename/Duplicate; Shift/Ctrl+Click for Multi-Select",
+            "queue_navigation": "Toolbar Prev/Next selects tasks and loads code into the editor without popup",
+            "review_popup": "Double-click queue item to open editable review popup with Apply-to-File and Save-to-Queue",
+            "auto_refresh": "Runs on main thread every 5s; preserves tree expansion/selection/scroll; does not reload editor unexpectedly",
+            "terminal": "Toggleable bottom panel for executing shell commands and scripts in the project context",
+            "unsaved_changes": "Visual indicator (●) in title bar; prompt to save changes before closing app or opening new file"
+        },
+        "supported_operations": {
+            "write": "Overwrite existing file or create new file with content",
+            "create_file": "Create new file with content (fails if file exists unless conflict_resolution specified)",
+            "create_folder": "Create new directory (supports conflict resolution)",
+            "rename": "Rename existing file or folder (requires confirmation)",
+            "move": "Move file or folder to new location (requires confirmation)",
+            "copy": "Copy file or folder to new location (supports conflict resolution)",
+            "delete": "Delete file or folder (requires confirmation)"
+        },
+        "queue_structure": {
+            "operation": "Operation type: write|create_file|create_folder|rename|move|copy|delete",
+            "file_path": "Path to the file this task modifies (for write operations)",
+            "source_path": "Source path for rename/move/copy operations",
+            "target_path": "Target path for create/rename/move/copy operations", 
+            "task": "Short human-readable description of what to do",
+            "code": "Code content for write/create_file operations",
+            "commands": ["Optional shell commands to run for this task"],
+            "conflict_resolution": "How to handle conflicts: ask|skip|overwrite|backup (default overwrite for Execute)",
+            "require_confirmation": "Whether to ask user confirmation (default: false for non-destructive, true for destructive)",
+            "status": "Pending | Executed | Error",
+            "errors": ["List of errors encountered during execution"],
+            "dependencies": ["Optional list of related files/tasks"],
+            "context": "Optional context description about the file/task",
+            "ai_notes": "Optional AI explanations or instructions for this task"
+        },
+        "safety_features": {
+            "path_validation": "All operations are validated to stay within project directory; paths are automatically normalized (mixed slashes handled)",
+            "conflict_resolution": "User can choose how to handle file/folder conflicts",
+            "confirmation_dialogs": "Destructive operations (rename, move, delete) require confirmation",
+            "automatic_backups": "System creates backups before overwriting files when possible",
+            "error_handling": "Detailed error reporting and graceful failure handling; post-write verification ensures file existence",
+            "rollback_support": "Operations can be reviewed and retried if they fail"
+        },
+        "workflow_instructions": [
+            "Always use the appropriate 'operation' field for the intended file system action.",
+            "Use 'source_path' and 'target_path' for rename/move/copy operations.",
+            "Use 'target_path' for create_file/create_folder operations.",
+            "Use 'file_path' for write operations (legacy support).",
+            "Set 'require_confirmation': true for operations that modify user data.",
+            "Include 'conflict_resolution' when creating files that might exist.",
+            "Add 'dependencies' for tasks that must execute in specific order.",
+            "Provide 'context' and 'ai_notes' to explain complex operations.",
+            "Group related operations together using dependencies for project restructuring.",
+            "Create backups before destructive operations using copy operations first.",
+            "For code changes, supply 'code' and 'file_path'; Editor supports review popup and direct apply during Execute.",
+            "Paths can use forward slashes (/) for cross-platform compatibility; Editor normalizes them automatically."
+        ],
+        "project_context": "AI may request short project report (file names/types) or full project report (file contents) for context.",
+        "best_practices": [
+            "Always create backups before major file restructuring",
+            "Use 'conflict_resolution': 'ask' for user choice on conflicts when not auto-executing",
+            "Set 'require_confirmation': true for destructive operations (rename, move, delete)",
+            "Group file structure changes in logical sequences using dependencies",
+            "Test operations on non-critical files first",
+            "Use descriptive 'task' fields to explain complex operations",
+            "Include shell commands only when necessary for build/test processes"
+        ],
+        "example_operations": {
+            "create_file": {
+                "task": "Create new authentication module",
+                "operation": "create_file",
+                "target_path": "src/auth/login.py",
+                "code": "import hashlib\\n\\ndef login(username, password):\\n    return True",
+                "conflict_resolution": "ask",
+                "require_confirmation": False,
+                "status": "Pending",
+                "errors": [],
+                "dependencies": [],
+                "context": "Authentication system for user management",
+                "ai_notes": "Basic login stub to be expanded later"
+            },
+            "create_folder": {
+                "task": "Create controllers directory structure",
+                "operation": "create_folder",
+                "target_path": "src/controllers",
+                "require_confirmation": False,
+                "status": "Pending",
+                "errors": [],
+                "dependencies": [],
+                "context": "Controller organization for MVC pattern"
+            },
+            "rename": {
+                "task": "Rename old config to use new naming convention",
+                "operation": "rename",
+                "source_path": "old_config.json",
+                "target_path": "config_v2.json",
+                "require_confirmation": True,
+                "status": "Pending",
+                "errors": [],
+                "dependencies": [],
+                "context": "Update naming convention for configuration files"
+            },
+            "move": {
+                "task": "Organize utils into src/helpers directory",
+                "operation": "move",
+                "source_path": "utils.py",
+                "target_path": "src/helpers/utils.py",
+                "require_confirmation": True,
+                "status": "Pending",
+                "errors": [],
+                "dependencies": ["src/helpers"],
+                "context": "Improve project organization"
+            },
+            "copy": {
+                "task": "Create backup of configuration before modification",
+                "operation": "copy",
+                "source_path": "config.json",
+                "target_path": "config_backup.json",
+                "require_confirmation": False,
+                "status": "Pending",
+                "errors": [],
+                "dependencies": [],
+                "context": "Safety backup before major changes"
+            },
+            "delete": {
+                "task": "Remove deprecated migration file",
+                "operation": "delete",
+                "source_path": "migrations/old_migration.sql",
+                "require_confirmation": True,
+                "status": "Pending",
+                "errors": [],
+                "dependencies": [],
+                "context": "Clean up obsolete database migrations"
+            }
+        },
+        "project_restructure_example": {
+            "queue": [
+                {
+                    "task": "Create new project structure",
+                    "operation": "create_folder",
+                    "target_path": "src",
+                    "require_confirmation": False
+                },
+                {
+                    "task": "Create controllers folder",
+                    "operation": "create_folder",
+                    "target_path": "src/controllers",
+                    "dependencies": ["src"],
+                    "require_confirmation": False
+                },
+                {
+                    "task": "Create models folder",
+                    "operation": "create_folder",
+                    "target_path": "src/models",
+                    "dependencies": ["src"],
+                    "require_confirmation": False
+                },
+                {
+                    "task": "Move main.py to src/ folder",
+                    "operation": "move",
+                    "source_path": "main.py",
+                    "target_path": "src/main.py",
+                    "dependencies": ["src"],
+                    "require_confirmation": True
+                }
+            ]
+        }
+    }
+    root.clipboard_clear()
+    root.clipboard_append(json.dumps(guide_json, indent=2))
+    show_info_log("Rogue Agent", "Rogue Agent Guide JSON copied to clipboard!")
+
+
+def generate_project_report():
+    """Return a JSON string with full project report (files + queue + metadata)"""
+    if not BASE_DIR:
+        show_warning_log("Rogue Agent", "No project folder loaded.")
+        return ""
+
+    report = {
+        "project": {
+            "path": BASE_DIR,
+            "name": os.path.basename(BASE_DIR),
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        },
+        "queue": load_queue().get("queue", []),
+        "files": {}
+    }
+
+    # Sort files by path for consistency
+    for rel_path in sorted(file_map.keys()):
+        full_path = file_map[rel_path]
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            content = "# Unable to read file"
+            
+        report["files"][rel_path] = {
+            "content": content,
+            "size": os.path.getsize(full_path)
+        }
+
+    return json.dumps(report, indent=2)
+
+
+def copy_project_report():
+    """Copy the full project report JSON to clipboard"""
+    report_json = generate_project_report()
+    if report_json:
+        root.clipboard_clear()
+        root.clipboard_append(report_json)
+        show_info_log("Rogue Agent", "Full project report copied to clipboard!")
+
+
+def generate_file_tree_text(file_names):
+    """Generate a compact text-based tree representation of the project structure"""
+    if not file_names:
+        return ""
+        
+    # Build nested dict structure
+    tree = {}
+    for path in sorted(file_names):
+        parts = path.split(os.sep)
+        current = tree
+        for part in parts:
+            current = current.setdefault(part, {})
+            
+    # Convert to text
+    lines = []
+    def _format_tree(node, prefix=""):
+        # Separate files and directories
+        dirs = []
+        files = []
+        for name, subtree in sorted(node.items()):
+            if subtree:
+                dirs.append(name)
+            else:
+                files.append(name)
+                
+        # Process directories first
+        for i, d in enumerate(dirs):
+            is_last_item = (i == len(dirs) - 1) and not files
+            connector = "└── " if is_last_item else "├── "
+            lines.append(f"{prefix}{connector}{d}/")
+            new_prefix = prefix + ("    " if is_last_item else "│   ")
+            _format_tree(node[d], new_prefix)
+            
+        # Process files
+        for i, f in enumerate(files):
+            is_last = (i == len(files) - 1)
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{prefix}{connector}{f}")
+            
+    _format_tree(tree)
+    return "\n".join(lines)
+
+def generate_short_project_report():
+    """Return a JSON string with condensed project overview for AI"""
+    if not BASE_DIR:
+        return json.dumps({"error": "No project folder loaded"}, indent=2)
+
+    # Count file types and collect file names
+    file_types = {}
+    file_names = []
+    total_size = 0
+    
+    for rel_path, full_path in file_map.items():
+        file_names.append(rel_path)
+        
+        # Get file extension
+        _, ext = os.path.splitext(rel_path)
+        ext = ext.lower() if ext else "no_extension"
+        file_types[ext] = file_types.get(ext, 0) + 1
+        
+        # Add to total size
+        try:
+            total_size += os.path.getsize(full_path)
+        except Exception:
+            pass
+
+    # Analyze queue
+    queue_data = load_queue().get("queue", [])
+    queue_summary = {
+        "total_tasks": len(queue_data),
+        "executed": len([item for item in queue_data if item.get("executed") or item.get("status") == "Executed"]),
+        "pending": len([item for item in queue_data if item.get("status") == "Pending"]),
+        "errors": len([item for item in queue_data if item.get("status") == "Error"])
+    }
+
+    # Detect project type
+    project_type = "Unknown"
+    if file_types.get(".py", 0) > 0 and os.path.exists(os.path.join(BASE_DIR, "main.py")):
+        project_type = "Python GUI Application"
+    elif file_types.get(".dart", 0) > 0:
+        project_type = "Dart/Flutter Project"
+    elif file_types.get(".py", 0) > 0:
+        project_type = "Python Project"
+    
+    if "Rogue Agent" in BASE_DIR or "Rogue_Agent" in BASE_DIR:
+        project_type = "Rogue Agent - Offline Agentic Code Editor"
+
+    short_report = {
+        "project": {
+            "name": os.path.basename(BASE_DIR),
+            "type": project_type,
+            "path": BASE_DIR,
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        },
+        "editor_capabilities": [
+            "File System: Create, Read, Update, Delete, Rename, Duplicate, Move",
+            "Bulk Operations: Shift-Select for multi-file Delete, Copy, Paste, Duplicate",
+            "Terminal: Integrated shell for command execution",
+            "Queue: JSON-based task execution agent"
+        ],
+        "stats": {
+            "file_count": len(file_names),
+            "total_size": f"{total_size / 1024:.1f} KB",
+            "types": file_types
+        },
+        "queue": queue_summary,
+        "structure": generate_file_tree_text(file_names),
+        "ai_guide": "Use the structure above to understand file locations. Request full report for file content."
+    }
+
+    return json.dumps(short_report, indent=2)
+
+
+def copy_short_project_report():
+    """Copy the short project report JSON to clipboard"""
+    report_json = generate_short_project_report()
+    if report_json:
+        root.clipboard_clear()
+        root.clipboard_append(report_json)
+        show_info_log("Rogue Agent", "Short project report copied to clipboard!")
+
+
+def paste_instructions():
+    """Paste AI Browser commands from clipboard into JSON queue"""
+    try:
+        text = root.clipboard_get()
+        data = json.loads(text)
+        queue = load_queue()
+        if "queue" not in queue:
+            queue["queue"] = []
+        queue["queue"].extend(data.get("queue", []))
+        save_queue(queue)
+        refresh_queue_viewer()
+        show_info_log("Rogue Agent", "Instructions pasted into queue")
+    except Exception as e:
+        show_error_log("Rogue Agent", f"Failed to paste instructions:\n{e}")
+
+
+# =====================
+# 🔧 FILE SYSTEM OPERATIONS
+# =====================
+
+def validate_path_safety(path):
+    """Ensure path stays within project directory for safety"""
+    if not BASE_DIR:
+        return False, "No project directory loaded"
+    
+    try:
+        # Normalize paths to handle mixed slashes and relative components
+        abs_base = os.path.abspath(BASE_DIR)
+        
+        # Handle relative and absolute paths
+        if not os.path.isabs(path):
+            full_path = os.path.join(abs_base, path)
+        else:
+            full_path = path
+            
+        abs_path = os.path.abspath(full_path)
+        norm_path = os.path.normpath(abs_path)
+        norm_base = os.path.normpath(abs_base)
+        
+        # Check if path is within base directory using commonpath for accuracy
+        try:
+            # commonpath handles drive letters and case sensitivity correctly on Windows
+            common = os.path.commonpath([norm_base, norm_path])
+            is_safe = common == norm_base
+        except ValueError:
+            # Paths are on different drives
+            is_safe = False
+            
+        return is_safe, "Path is safe" if is_safe else f"Path is outside project directory: {path}"
+    except Exception as e:
+        return False, f"Invalid path: {e}"
+
+def handle_conflict_dialog(operation, path, existing_type="file"):
+    """Handle file/folder conflicts with user choice"""
+    choice = messagebox.askyesnocancel(
+        "Conflict Detected",
+        f"{existing_type.capitalize()} '{os.path.basename(path)}' already exists.\n\n"
+        f"Do you want to overwrite it?\n"
+        f"Yes = Overwrite\nNo = Skip\nCancel = Abort operation",
+        icon=messagebox.WARNING
+    )
+    
+    if choice is True:
+        return "overwrite"
+    elif choice is False:
+        return "skip"
+    else:
+        return "cancel"
+
+def create_backup_if_needed(file_path):
+    """Create backup of file before destructive operation"""
+    if not os.path.exists(file_path):
+        return None
+    
+    backup_path = f"{file_path}.backup_{int(time.time())}"
+    try:
+        import shutil
+        shutil.copy2(file_path, backup_path)
+        return backup_path
+    except Exception:
+        return None
+
+def create_file_safe(path, content="", conflict_resolution="ask"):
+    """Safely create file with conflict handling"""
+    if not BASE_DIR:
+        return False, "No project directory loaded"
+    
+    # Validate path safety
+    is_safe, msg = validate_path_safety(path)
+    if not is_safe:
+        return False, f"Path safety violation: {msg}"
+    
+    # Normalize path
+    full_path = os.path.join(BASE_DIR, path) if not os.path.isabs(path) else path
+    full_path = os.path.normpath(full_path)
+    
+    # Create directories if needed
+    try:
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    except Exception as e:
+        return False, f"Failed to create directories: {e}"
+    
+    # Handle conflicts
+    if os.path.exists(full_path):
+        if conflict_resolution == "ask":
+            result = handle_conflict_dialog("create_file", full_path, "file")
+            if result == "cancel":
+                return False, "Operation cancelled by user"
+            elif result == "skip":
+                return True, "Skipped existing file"
+        
+        if conflict_resolution == "skip":
+            return True, "Skipped existing file"
+        
+        # Create backup if overwriting
+        backup_path = create_backup_if_needed(full_path)
+        if backup_path:
+            print(f"Created backup: {backup_path}")
+    
+    # Create the file
+    try:
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            
+        # Verify creation
+        if not os.path.exists(full_path):
+             return False, "File write appeared successful but file not found on disk"
+             
+        return True, f"Successfully created {path}"
+    except Exception as e:
+        return False, f"Failed to create file: {e}"
+
+def create_folder_safe(path, conflict_resolution="ask"):
+    """Safely create folder with conflict handling"""
+    if not BASE_DIR:
+        return False, "No project directory loaded"
+    
+    # Validate path safety
+    is_safe, msg = validate_path_safety(path)
+    if not is_safe:
+        return False, f"Path safety violation: {msg}"
+    
+    full_path = os.path.join(BASE_DIR, path) if not os.path.isabs(path) else path
+    full_path = os.path.normpath(full_path)
+    
+    # Handle conflicts
+    if os.path.exists(full_path):
+        if os.path.isdir(full_path):
+            if conflict_resolution == "ask":
+                choice = messagebox.askyesnocancel(
+                    "Folder Exists",
+                    f"Folder '{os.path.basename(full_path)}' already exists.\n\n"
+                    f"Keep existing folder?\n"
+                    f"Yes = Keep existing\nNo = Create new with suffix\nCancel = Abort",
+                    icon=messagebox.WARNING
+                )
+                if choice is True:
+                    return True, "Folder already exists"
+                elif choice is None:
+                    return False, "Operation cancelled by user"
+                else:
+                    # Create with number suffix
+                    counter = 1
+                    while os.path.exists(f"{full_path}_{counter}"):
+                        counter += 1
+                    full_path = f"{full_path}_{counter}"
+        else:
+            if conflict_resolution == "ask":
+                result = handle_conflict_dialog("create_folder", full_path, "file")
+                if result == "cancel":
+                    return False, "Operation cancelled by user"
+                elif result == "skip":
+                    return True, "Skipped existing file"
+    
+    # Create the folder
+    try:
+        os.makedirs(full_path, exist_ok=True)
+        
+        # Verify creation
+        if not os.path.isdir(full_path):
+             return False, "Folder creation appeared successful but folder not found"
+             
+        return True, f"Successfully created folder {path}"
+    except Exception as e:
+        return False, f"Failed to create folder: {e}"
+
+def rename_file_safe(old_path, new_path, conflict_resolution="ask"):
+    """Safely rename file with confirmation"""
+    if not BASE_DIR:
+        return False, "No project directory loaded"
+    
+    # Validate path safety
+    old_full = os.path.join(BASE_DIR, old_path) if not os.path.isabs(old_path) else old_path
+    new_full = os.path.join(BASE_DIR, new_path) if not os.path.isabs(new_path) else new_path
+    
+    old_full = os.path.normpath(old_full)
+    new_full = os.path.normpath(new_full)
+    
+    is_safe_old, msg_old = validate_path_safety(old_full)
+    is_safe_new, msg_new = validate_path_safety(new_full)
+    if not is_safe_old or not is_safe_new:
+        return False, f"Path safety violation: {msg_old or msg_new}"
+    
+    # Check if source exists
+    if not os.path.exists(old_full):
+        return False, f"Source file/folder does not exist: {old_path}"
+    
+    # Handle conflicts
+    if os.path.exists(new_full):
+        if conflict_resolution == "ask":
+            result = handle_conflict_dialog("rename", new_full, "file or folder")
+            if result == "cancel":
+                return False, "Operation cancelled by user"
+            elif result == "skip":
+                return True, "Skipped rename due to conflict"
+    
+    # Perform rename
+    try:
+        import shutil
+        os.rename(old_full, new_full)
+        return True, f"Successfully renamed {old_path} to {new_path}"
+    except Exception as e:
+        return False, f"Failed to rename: {e}"
+
+def move_file_safe(source_path, target_path, conflict_resolution="ask"):
+    """Safely move file with confirmation"""
+    if not BASE_DIR:
+        return False, "No project directory loaded"
+    
+    # Validate path safety
+    source_full = os.path.join(BASE_DIR, source_path) if not os.path.isabs(source_path) else source_path
+    target_full = os.path.join(BASE_DIR, target_path) if not os.path.isabs(target_path) else target_path
+    
+    source_full = os.path.normpath(source_full)
+    target_full = os.path.normpath(target_full)
+    
+    is_safe_source, msg_source = validate_path_safety(source_full)
+    is_safe_target, msg_target = validate_path_safety(target_full)
+    if not is_safe_source or not is_safe_target:
+        return False, f"Path safety violation: {msg_source or msg_target}"
+    
+    # Check if source exists
+    if not os.path.exists(source_full):
+        return False, f"Source file/folder does not exist: {source_path}"
+    
+    # Create target directory if needed
+    target_dir = os.path.dirname(target_full)
+    if target_dir:
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            return False, f"Failed to create target directory: {e}"
+    
+    # Handle conflicts
+    if os.path.exists(target_full):
+        if conflict_resolution == "ask":
+            result = handle_conflict_dialog("move", target_full, "file or folder")
+            if result == "cancel":
+                return False, "Operation cancelled by user"
+            elif result == "skip":
+                return True, "Skipped move due to conflict"
+    
+    # Perform move
+    try:
+        import shutil
+        if os.path.isdir(source_full):
+            shutil.move(source_full, target_full)
+        else:
+            shutil.move(source_full, target_full)
+        return True, f"Successfully moved {source_path} to {target_path}"
+    except Exception as e:
+        return False, f"Failed to move: {e}"
+
+def copy_file_safe(source_path, target_path, conflict_resolution="ask"):
+    """Safely copy file with conflict handling"""
+    if not BASE_DIR:
+        return False, "No project directory loaded"
+    
+    # Validate path safety
+    source_full = os.path.join(BASE_DIR, source_path) if not os.path.isabs(source_path) else source_path
+    target_full = os.path.join(BASE_DIR, target_path) if not os.path.isabs(target_path) else target_path
+    
+    source_full = os.path.normpath(source_full)
+    target_full = os.path.normpath(target_full)
+    
+    is_safe_source, msg_source = validate_path_safety(source_full)
+    is_safe_target, msg_target = validate_path_safety(target_full)
+    if not is_safe_source or not is_safe_target:
+        return False, f"Path safety violation: {msg_source or msg_target}"
+    
+    # Check if source exists
+    if not os.path.exists(source_full):
+        return False, f"Source file/folder does not exist: {source_path}"
+    
+    # Create target directory if needed
+    target_dir = os.path.dirname(target_full)
+    if target_dir:
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            return False, f"Failed to create target directory: {e}"
+    
+    # Handle conflicts
+    if os.path.exists(target_full):
+        if conflict_resolution == "ask":
+            result = handle_conflict_dialog("copy", target_full, "file or folder")
+            if result == "cancel":
+                return False, "Operation cancelled by user"
+            elif result == "skip":
+                return True, "Skipped copy due to conflict"
+    
+    # Perform copy
+    try:
+        import shutil
+        if os.path.isdir(source_full):
+            shutil.copytree(source_full, target_full, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source_full, target_full)
+        return True, f"Successfully copied {source_path} to {target_path}"
+    except Exception as e:
+        return False, f"Failed to copy: {e}"
+
+def delete_file_safe(path, require_confirmation=True):
+    """Safely delete file with confirmation"""
+    if not BASE_DIR:
+        return False, "No project directory loaded"
+    
+    # Validate path safety
+    full_path = os.path.join(BASE_DIR, path) if not os.path.isabs(path) else path
+    full_path = os.path.normpath(full_path)
+    
+    is_safe, msg = validate_path_safety(full_path)
+    if not is_safe:
+        return False, f"Path safety violation: {msg}"
+    
+    # Check if exists
+    if not os.path.exists(full_path):
+        return False, f"File/folder does not exist: {path}"
+    
+    # Confirmation dialog
+    if require_confirmation:
+        item_type = "folder" if os.path.isdir(full_path) else "file"
+        choice = messagebox.askyesno(
+            "Confirm Deletion",
+            f"Are you sure you want to delete the {item_type}:\n{path}\n\n"
+            f"This action cannot be undone!",
+            icon=messagebox.WARNING
+        )
+        if not choice:
+            return False, "Operation cancelled by user"
+    
+    # Perform deletion
+    try:
+        import shutil
+        if os.path.isdir(full_path):
+            shutil.rmtree(full_path)
+        else:
+            os.remove(full_path)
+        return True, f"Successfully deleted {path}"
+    except Exception as e:
+        return False, f"Failed to delete: {e}"
+
+def execute_agent():
+    """Execute all queued commands with enhanced file system operations"""
+    try:
+        queue = load_queue()
+        
+        # Count pending tasks first
+        pending_tasks = [item for item in queue.get("queue", []) if not item.get("executed")]
+        if not pending_tasks:
+            show_info_log("Execute", "No pending tasks to execute in the queue.")
+            return
+
+        executed_count = 0
+        error_count = 0
+        
+        for item in queue.get("queue", []):
+            if item.get("executed"):
+                continue
+
+            try:
+                operation = item.get("operation", "write")
+                conflict_resolution = item.get("conflict_resolution", "overwrite")
+                require_confirmation = item.get("require_confirmation", False)
+                
+                # Initialize errors list
+                item["errors"] = []
+                
+                # Handle different operation types
+                if operation == "write" or operation == "create_file":
+                    if "code" in item and item["code"]:
+                        file_path = item.get("file_path") or os.path.join(BASE_DIR, "temp_code.py")
+                        success, message = create_file_safe(file_path, item["code"], conflict_resolution)
+                        if not success:
+                            item["errors"].append(message)
+                            item["status"] = "Error"
+                            log_error(f"Task Failed (Write): {message}")
+                        else:
+                            item["status"] = "Executed"
+                            executed_count += 1
+                
+                elif operation == "create_folder":
+                    target_path = item.get("target_path")
+                    if target_path:
+                        success, message = create_folder_safe(target_path, conflict_resolution)
+                        if not success:
+                            item["errors"].append(message)
+                            item["status"] = "Error"
+                            log_error(f"Task Failed (Create Folder): {message}")
+                        else:
+                            item["status"] = "Executed"
+                            executed_count += 1
+                    else:
+                        msg = "Missing target_path for create_folder operation"
+                        item["errors"].append(msg)
+                        item["status"] = "Error"
+                        log_error(f"Task Error: {msg}")
+                
+                elif operation == "rename":
+                    source_path = item.get("source_path")
+                    target_path = item.get("target_path")
+                    if source_path and target_path:
+                        success, message = rename_file_safe(source_path, target_path, conflict_resolution)
+                        if not success:
+                            item["errors"].append(message)
+                            item["status"] = "Error"
+                            log_error(f"Task Failed (Rename): {message}")
+                        else:
+                            item["status"] = "Executed"
+                            executed_count += 1
+                    else:
+                        msg = "Missing source_path or target_path for rename operation"
+                        item["errors"].append(msg)
+                        item["status"] = "Error"
+                        log_error(f"Task Error: {msg}")
+                
+                elif operation == "move":
+                    source_path = item.get("source_path")
+                    target_path = item.get("target_path")
+                    if source_path and target_path:
+                        success, message = move_file_safe(source_path, target_path, conflict_resolution)
+                        if not success:
+                            item["errors"].append(message)
+                            item["status"] = "Error"
+                            log_error(f"Task Failed (Move): {message}")
+                        else:
+                            item["status"] = "Executed"
+                            executed_count += 1
+                    else:
+                        msg = "Missing source_path or target_path for move operation"
+                        item["errors"].append(msg)
+                        item["status"] = "Error"
+                        log_error(f"Task Error: {msg}")
+                
+                elif operation == "copy":
+                    source_path = item.get("source_path")
+                    target_path = item.get("target_path")
+                    if source_path and target_path:
+                        success, message = copy_file_safe(source_path, target_path, conflict_resolution)
+                        if not success:
+                            item["errors"].append(message)
+                            item["status"] = "Error"
+                            log_error(f"Task Failed (Copy): {message}")
+                        else:
+                            item["status"] = "Executed"
+                            executed_count += 1
+                    else:
+                        msg = "Missing source_path or target_path for copy operation"
+                        item["errors"].append(msg)
+                        item["status"] = "Error"
+                        log_error(f"Task Error: {msg}")
+                
+                elif operation == "delete":
+                    source_path = item.get("source_path")
+                    if source_path:
+                        success, message = delete_file_safe(source_path, require_confirmation)
+                        if not success:
+                            item["errors"].append(message)
+                            item["status"] = "Error"
+                            log_error(f"Task Failed (Delete): {message}")
+                        else:
+                            item["status"] = "Executed"
+                            executed_count += 1
+                    else:
+                        msg = "Missing source_path for delete operation"
+                        item["errors"].append(msg)
+                        item["status"] = "Error"
+                        log_error(f"Task Error: {msg}")
+                
+                else:
+                    # Legacy support for old format
+                    if "code" in item and item["code"]:
+                        file_path = item.get("file_path") or os.path.join(BASE_DIR, "temp_code.py")
+                        success, message = create_file_safe(file_path, item["code"], conflict_resolution)
+                        if not success:
+                            item["errors"].append(message)
+                            item["status"] = "Error"
+                            log_error(f"Task Failed (Legacy Write): {message}")
+                        else:
+                            item["status"] = "Executed"
+                            executed_count += 1
+                
+                # Run commands if any
+                for cmd in item.get("commands", []):
+                    try:
+                        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                        if result.stdout or result.stderr:
+                            item["errors"].append(f"Command output: {result.stdout + result.stderr}")
+                            if result.returncode != 0:
+                                log_error(f"Command Failed ({cmd}): {result.stderr}")
+                            else:
+                                log_error(f"Command Output ({cmd}): {result.stdout}")
+                    except Exception as e:
+                        msg = f"Command failed: {str(e)}"
+                        item["errors"].append(msg)
+                        log_error(msg)
+                
+                # Set final status if not already set to Error
+                if item["status"] != "Error":
+                    item["executed"] = True
+                    item["status"] = "Executed"
+                else:
+                    error_count += 1
+                    
+            except Exception as e:
+                msg = f"Unexpected error: {str(e)}"
+                item["errors"].append(msg)
+                item["status"] = "Error"
+                item["executed"] = True  # Mark as attempted
+                error_count += 1
+                log_error(msg)
+
+        save_queue(queue)
+        refresh_queue_viewer()
+        
+        # Refresh file list and reload current file
+        scan_project_files()
+        refresh_file_list()
+        if current_file:
+            open_selected_file(path=current_file)
+
+        # Show execution summary
+        if error_count > 0:
+            show_warning_log("Execution Complete", 
+                               f"Execution finished with errors.\n\n"
+                               f"Executed: {executed_count}\n"
+                               f"Errors: {error_count}\n\n"
+                               f"Check queue items for details.")
+        else:
+            show_info_log("Execution Complete", 
+                              f"Successfully executed {executed_count} tasks.")
+                              
+    except Exception as e:
+        show_error_log("Execution Error", f"An unexpected error occurred during execution:\n{str(e)}")
+
+
+
+# KEEP & UPDATE
+def load_selected_queue(idx):
+    global current_queue_idx
+    queue = load_queue()
+    if not queue.get("queue"):
+        return
+
+    # Save edits to previous queue item
+    if current_queue_idx is not None and 0 <= current_queue_idx < len(queue["queue"]):
+        prev_item = queue["queue"][current_queue_idx]
+        prev_item["code"] = code_editor.get("1.0", tk.END)
+        save_queue(queue)
+
+    # Load new queue item
+    if 0 <= idx < len(queue["queue"]):
+        item = queue["queue"][idx]
+        code_editor.delete("1.0", tk.END)
+        code_editor.insert(tk.END, item.get("code", ""))
+        code_editor.edit_reset()
+        current_queue_idx = idx
+        refresh_queue_viewer()
+        queue_tree.selection_set(idx)
+        queue_tree.see(idx)
+
+
+# =====================
+# 💾 SAVE FUNCTIONS
+# =====================
+
+
+def save_current_file(event=None):
+    global current_file, current_queue_idx, file_modified
+    if not current_file:
+        show_warning_log("Rogue Agent", "No file selected to save.")
+        return
+    try:
+        content = code_editor.get("1.0", tk.END)
+        with open(current_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        # Update queue if this file is in queue
+        if current_queue_idx is not None:
+            queue = load_queue()
+            item = queue["queue"][current_queue_idx]
+            if item.get("file_path") == current_file:
+                item["code"] = content
+                save_queue(queue)
+                refresh_queue_viewer()
+
+        scan_project_files()
+        refresh_file_list()
+        
+        file_modified = False
+        update_title()
+        code_editor.edit_modified(False)
+        
+        show_info_log("Rogue Agent", f"Saved: {current_file}")
+    except Exception as e:
+        show_error_log("Rogue Agent", f"Failed to save file:\n{e}")
+  
+
+def save_all_files():
+    """Save all files currently loaded in the project"""
+    if not BASE_DIR:
+        show_warning_log("Rogue Agent", "No project folder loaded.")
+        return
+
+    for rel, full_path in file_map.items():
+        try:
+            # Only save files that are currently open in the editor
+            if full_path == current_file:
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(code_editor.get("1.0", tk.END))
+        except Exception as e:
+            show_error_log("Rogue Agent", f"Failed to save {full_path}:\n{e}")
+
+    # Save all queued files as well
+    queue = load_queue()
+    for item in queue.get("queue", []):
+        if "file_path" in item and "code" in item and item["code"] != "":
+            try:
+                with open(item["file_path"], "w", encoding="utf-8") as f:
+                    f.write(item["code"])
+            except Exception as e:
+                show_error_log("Rogue Agent", f"Failed to save {item['file_path']}:\n{e}")
+
+    # Refresh editor and queue after saving
+    scan_project_files()
+    refresh_file_list()
+    refresh_queue_viewer()
+    show_info_log("Rogue Agent", "All files saved successfully!")
+
+
+
+# =====================
+# 🧩 QUEUE VIEWER PANEL
+# =====================
+queue_frame = tk.Frame(main_frame, bg=QUEUE_BG, width=400)
+queue_frame.pack(side=tk.RIGHT, fill=tk.Y)
+
+queue_tree = ttk.Treeview(queue_frame, columns=("File","Task","Status"), show="headings")
+queue_tree.heading("File", text="File")
+queue_tree.heading("Task", text="Task")
+queue_tree.heading("Status", text="Status")
+queue_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+# styling...
+style = ttk.Style()
+style.theme_use("default")
+style.configure("Treeview", background=QUEUE_BG, foreground=FG_TEXT, fieldbackground=QUEUE_BG, rowheight=22)
+style.map("Treeview", background=[('selected', HIGHLIGHT)], foreground=[('selected', FG_TEXT)])
+
+
+
+def refresh_queue_viewer():
+    global current_queue_idx
+    for i in queue_tree.get_children():
+        queue_tree.delete(i)
+
+    queue = load_queue()
+    for idx, item in enumerate(queue.get("queue", [])):
+        status = item.get("status", "Pending")
+        queue_tree.insert("", "end", iid=idx, values=(item.get("file_path", ""), item.get("task", ""), status))
+        if status == "Pending":
+            queue_tree.tag_configure(f"row{idx}", background=QUEUE_BG, foreground=QUEUE_PENDING)
+        elif status == "Executed":
+            queue_tree.tag_configure(f"row{idx}", background=QUEUE_BG, foreground=QUEUE_EXECUTED)
+        elif status == "Error":
+            queue_tree.tag_configure(f"row{idx}", background=QUEUE_BG, foreground=QUEUE_ERROR)
+        queue_tree.item(idx, tags=(f"row{idx}",))
+
+    # Highlight current queue item if exists
+    if current_queue_idx is not None and str(current_queue_idx) in queue_tree.get_children():
+        queue_tree.selection_set(current_queue_idx)
+        queue_tree.see(current_queue_idx)
+
+
+
+# =====================
+# 🔎 DIFF PREVIEW POPUP (EDITABLE + AUTO-REFRESH EDITOR)
+# =====================
+def show_diff_popup_by_index(idx):
+    global current_queue_idx
+    queue = load_queue()
+    if idx < 0 or idx >= len(queue.get("queue", [])):
+        return
+    current_queue_idx = idx
+    item = queue["queue"][idx]
+    code_ai = item.get("code", "")
+    file_path = item.get("file_path")
+    try:
+        if file_path and os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                original = f.read()
+        else:
+            original = ""
+    except Exception:
+        original = ""
+    popup = tk.Toplevel(root)
+    popup.title(f"Review Task: {os.path.basename(file_path) if file_path else 'New'}")
+    popup.geometry("900x600")
+    txt = scrolledtext.ScrolledText(popup, font=("Consolas",12), bg=BG_MAIN, fg=FG_TEXT)
+    txt.pack(fill=tk.BOTH, expand=True)
+    txt.insert("1.0", code_ai)
+    txt.see("1.0")
+    txt.focus()
+    def save_to_queue():
+        new_code = txt.get("1.0", tk.END)
+        item["code"] = new_code
+        save_queue(queue)
+        if current_file == file_path:
+            code_editor.delete("1.0", tk.END)
+            code_editor.insert(tk.END, new_code)
+        refresh_queue_viewer()
+        queue_tree.selection_set(idx)
+        queue_tree.see(idx)
+        popup.destroy()
+    def apply_to_file():
+        new_code = txt.get("1.0", tk.END)
+        item["code"] = new_code
+        save_queue(queue)
+        if file_path:
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(new_code)
+            except Exception as e:
+                show_error_log("Rogue Agent", f"Failed to save file:\n{e}")
+                return
+        if current_file == file_path:
+            code_editor.delete("1.0", tk.END)
+            code_editor.insert(tk.END, new_code)
+        refresh_queue_viewer()
+        queue_tree.selection_set(idx)
+        queue_tree.see(idx)
+        popup.destroy()
+    def go_prev():
+        popup.destroy()
+        show_diff_popup_by_index(idx - 1)
+    def go_next():
+        popup.destroy()
+        show_diff_popup_by_index(idx + 1)
+    btn_frame = tk.Frame(popup, bg=BG_MAIN)
+    btn_frame.pack(fill=tk.X, pady=4)
+    tk.Button(btn_frame, text="Apply to File", command=apply_to_file, bg=ACCENT, fg=FG_TEXT).pack(side=tk.LEFT, padx=4)
+    tk.Button(btn_frame, text="Save to Queue", command=save_to_queue, bg=ACCENT, fg=FG_TEXT).pack(side=tk.LEFT, padx=4)
+    tk.Button(btn_frame, text="← Prev", command=go_prev, bg=ACCENT, fg=FG_TEXT).pack(side=tk.LEFT, padx=4)
+    tk.Button(btn_frame, text="Next →", command=go_next, bg=ACCENT, fg=FG_TEXT).pack(side=tk.LEFT, padx=4)
+
+
+# =====================
+# 🖱️ QUEUE DOUBLE-CLICK HANDLER
+# =====================
+def on_queue_double_click(event):
+    selection = queue_tree.selection()
+    if not selection:
+        return
+    idx = selection[0]
+    if idx.isdigit():
+        show_diff_popup_by_index(int(idx))
+
+# ======================
+
+queue_tree.bind("<Double-1>", on_queue_double_click)
+
+# =====================
+# ⏩ QUEUE NAVIGATION FUNCTIONS
+# =====================
+def show_queue_task(idx):
+    """Show the queue task code in the editor preview dynamically."""
+    global current_queue_idx
+    queue = load_queue()
+    if not queue.get("queue"):
+        return
+    if idx < 0 or idx >= len(queue["queue"]):
+        return
+    current_queue_idx = idx
+    item = queue["queue"][idx]
+    code_editor.delete("1.0", tk.END)
+    code_editor.insert(tk.END, item.get("code",""))
+
+def select_next_queue():
+    global current_queue_idx
+    queue = load_queue()
+    if not queue.get("queue"):
+        return
+    if current_queue_idx is None:
+        new_idx = 0
+    else:
+        new_idx = min(current_queue_idx + 1, len(queue["queue"]) - 1)
+    load_selected_queue(new_idx)
+
+def select_previous_queue():
+    global current_queue_idx
+    queue = load_queue()
+    if not queue.get("queue"):
+        return
+    if current_queue_idx is None:
+        new_idx = len(queue["queue"]) - 1
+    else:
+        new_idx = max(current_queue_idx - 1, 0)
+    load_selected_queue(new_idx)
+
+
+
+
+# =====================
+# 🔘 ABOUT ME & USER GUIDE
+# =====================
+
+about_popup = None  # global variable to track About Me window
+settings_panel = None  # global variable to track Settings panel
+
+def show_about_me():
+    global about_popup
+    if about_popup and about_popup.winfo_exists():
+        # If the popup exists, destroy it (toggle behavior)
+        about_popup.destroy()
+        about_popup = None
+        return
+
+    about_popup = tk.Toplevel(root)
+    about_popup.title("About Me")
+    about_popup.configure(bg=BG_MAIN)
+    about_popup.resizable(False, False)
+
+    # Center the popup on screen
+    popup_width, popup_height = 400, 200
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x = (screen_width // 2) - (popup_width // 2)
+    y = (screen_height // 2) - (popup_height // 2)
+    about_popup.geometry(f"{popup_width}x{popup_height}+{x}+{y}")
+
+    # --- Content ---
+    tk.Label(about_popup, text="Rogue Agent Editor", font=("Segoe UI", 14, "bold"),
+             bg=BG_MAIN, fg=FG_TEXT).pack(pady=(10,5))
+
+    tk.Label(about_popup, text="Created by Makan Ansari & AI",
+             bg=BG_MAIN, fg=FG_TEXT).pack(pady=2)
+
+    # GitHub link
+    def open_github(event):
+        import webbrowser
+        webbrowser.open("https://github.com/makan4815162342")
+
+    github_label = tk.Label(about_popup, text="GitHub: https://github.com/makan4815162342",
+                            bg=BG_MAIN, fg="#1E90FF", cursor="hand2")
+    github_label.pack(pady=2)
+    github_label.bind("<Button-1>", open_github)
+
+    # Email copy
+    def copy_email(event):
+        root.clipboard_clear()
+        root.clipboard_append("makan4815162342@gmail.com")
+        root.update()
+        show_info_log("Copied!", "Email copied to clipboard.")
+
+    email_label = tk.Label(about_popup, text="Email: makan4815162342@gmail.com",
+                           bg=BG_MAIN, fg="#1E90FF", cursor="hand2")
+    email_label.pack(pady=2)
+    email_label.bind("<Button-1>", copy_email)
+
+    tk.Label(about_popup, text="Version: 1.0", bg=BG_MAIN, fg=FG_TEXT).pack(pady=2)
+
+    tk.Button(about_popup, text="Close", command=about_popup.destroy,
+              bg=ACCENT, fg=FG_TEXT).pack(pady=10)
+
+    # When the user manually closes with the "X", reset the variable
+    about_popup.protocol("WM_DELETE_WINDOW", lambda: [about_popup.destroy(), setattr(globals(), 'about_popup', None)])
+
+
+
+
+def show_user_guide():
+    guide_text = (
+        "Rogue Agent Editor User Guide\n\n"
+        "Getting Started\n"
+        "1) Open: Select your project folder using 'Open'.\n"
+        "2) Project Files: Navigate folders in the tree, click files to open. Right-click for Rename/Duplicate.\n"
+        "3) Search Files: Use the search box above the tree; press Enter to open the first match.\n"
+        "4) Filter: The file-type filter updates dynamically from your project extensions.\n\n"
+        "Editing\n"
+        "5) Syntax Highlighting: Automatic for .py, .json, .c/.cpp, .dart, .lua, .js/.ts, .html, .css, .java, .go, .rs, .yml/.yaml, .xml, .cs.\n"
+        "6) Unsaved Changes: A dot (●) in the title bar indicates unsaved changes. You will be prompted to save before closing.\n"
+        "7) Find in Editor: Use the search bar (Enter), F3 to find next, Shift+F3 for previous.\n"
+        "8) Save: Save, Save As, and Save All are available from the toolbar.\n\n"
+        "Bulk Operations\n"
+        "9) Multi-Select: Use Shift+Click or Ctrl+Click in the Project Files panel to select multiple items.\n"
+        "10) Bulk Actions: Right-click to Delete (Move to Recycle Bin), Copy, Paste, or Duplicate multiple files at once.\n\n"
+        "Queue Workflow\n"
+        "11) Paste Instructions: Paste AI-generated JSON tasks into the queue.\n"
+        "12) Review: Double-click a queue item to open the review popup. Edit code, then 'Apply to File' or 'Save to Queue'.\n"
+        "13) Navigate: Use ← Prev / Next → to move through queue tasks; toolbar Next/Prev selects and loads code into the editor.\n"
+        "14) Execute: 'Execute' applies queued write operations to disk (overwrite mode) and refreshes the project.\n\n"
+        "Toolbar & UI\n"
+        "15) Compact Toolbar: Short labels with tooltips; horizontal scroll when window is narrow.\n"
+        "16) Project Refresh: Runs safely on the main thread; folder expansion, selection, and scroll are preserved.\n"
+        "17) Terminal: Toggle the built-in terminal for command execution (supports multiple languages).\n\n"
+        "Tips\n"
+        "- Use Ctrl+S to save the current file.\n"
+        "- Use F3 / Shift+F3 to navigate editor search results.\n"
+        "- Use the filter to quickly narrow file types in large projects.\n"
+        "- Right-click files in the tree to Rename or Duplicate them."
+    )
+    show_info_log("User Guide", guide_text)
+
+
+
+# =====================
+# 🎨 BUTTON CREATION
+# =====================
+button_frame = tk.Frame(root, bg=BG_PANEL)
+button_frame.pack(side=tk.BOTTOM, fill=tk.X)
+toolbar_canvas = tk.Canvas(button_frame, bg=BG_PANEL, highlightthickness=0, borderwidth=0)
+toolbar_canvas.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
+toolbar_inner = tk.Frame(toolbar_canvas, bg=BG_PANEL)
+toolbar_canvas.create_window((0,0), window=toolbar_inner, anchor="nw")
+hscroll = tk.Scrollbar(button_frame, orient="horizontal", command=toolbar_canvas.xview)
+hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+toolbar_canvas.configure(xscrollcommand=hscroll.set)
+def _tb_conf(event=None):
+    toolbar_canvas.configure(scrollregion=toolbar_canvas.bbox("all"))
+    try:
+        h = toolbar_inner.winfo_reqheight()
+        if h > 0:
+            toolbar_canvas.configure(height=h)
+    except Exception:
+        pass
+toolbar_inner.bind("<Configure>", _tb_conf)
+
+toolbar_buttons = []
+def make_button(text, cmd, is_toolbar=False):
+    """Enhanced button with optional blinking for toolbar buttons"""
+    # Toolbar buttons get cyberpunk neon styling
+    if is_toolbar:
+        neon_colors = ["#00ffff", "#ff1493", "#ff4500", "#9400d3", "#00ff00", "#ff00ff"]
+        base_color = random.choice(neon_colors)
+        blink_state = {"phase": 0, "color_idx": 0}
+        
+        def on_enter(e):
+            btn.config(bg=base_color, fg="#000000", relief=tk.RAISED, 
+                        font=("Courier New", 9, "bold"), borderwidth=3)
+            
+        def on_leave(e):
+            btn.config(bg=ACCENT, fg=base_color, relief=tk.FLAT, 
+                        font=("Courier New", 9), borderwidth=2)
+            
+        def on_click(e):
+            original_bg = btn.cget("bg")
+            original_fg = btn.cget("fg")
+            btn.config(bg="#ffffff", fg="#000000", relief=tk.SOLID)
+            btn.after(80, lambda: btn.config(bg=original_bg, fg=original_fg, relief=tk.RAISED))
+        
+        def animate_toolbar_blink():
+            try:
+                phase = blink_state["phase"]
+                color_idx = blink_state["color_idx"]
+                
+                if phase % 4 == 0:
+                    btn.config(highlightbackground=neon_colors[color_idx])
+                elif phase % 4 == 2:
+                    btn.config(highlightbackground=blend_hex(neon_colors[color_idx], BG_PANEL, 0.3))
+                
+                if phase % 8 == 0:
+                    blink_state["color_idx"] = (color_idx + 1) % len(neon_colors)
+                    btn.config(fg=neon_colors[blink_state["color_idx"]])
+                
+                blink_state["phase"] = (phase + 1) % 16
+            except Exception:
+                pass
+            toolbar_inner.after(200, animate_toolbar_blink)
+        
+        btn = tk.Button(
+            toolbar_inner,
+            text=text,
+            command=cmd,
+            bg=ACCENT,
+            fg=base_color,
+            relief=tk.FLAT,
+            padx=6,
+            pady=3,
+            font=("Courier New", 9, "bold"),
+            activebackground=base_color,
+            activeforeground="#000000",
+            highlightthickness=2,
+            highlightbackground=base_color,
+            borderwidth=2
+        )
+        
+        btn.bind("<Enter>", on_enter)
+        btn.bind("<Leave>", on_leave)
+        btn.bind("<Button-1>", on_click)
+        
+        # Start toolbar button animations
+        if settings["interactive"]["beeping_lights"]:
+            animate_toolbar_blink()
+        
+        add_tooltip(btn, tooltip)
+        return btn
+    else:
+        # Regular buttons for UI elements
+        btn = tk.Button(
+            toolbar_inner,
+            text=text,
+            command=cmd,
+            bg=ACCENT,
+            fg=FG_TEXT,
+            activebackground=HIGHLIGHT,
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+            highlightthickness=1,
+            highlightbackground=BG_PANEL,
+            highlightcolor="#00ff66"
+        )
+        def on_enter(e):
+            btn.configure(bg="#2f2f2f")
+            if settings["interactive"]["beeping_lights"]:
+                btn.configure(highlightbackground="#00ff66")
+        def on_leave(e):
+            btn.configure(bg=ACCENT)
+            # Keep a subtle pulsing glow effect if interactive mode is on
+            if settings["interactive"]["beeping_lights"]:
+                btn.configure(highlightbackground="#004422") # Dim glow
+            else:
+                btn.configure(highlightbackground=BG_PANEL)
+              
+        btn.bind("<Enter>", on_enter)
+        btn.bind("<Leave>", on_leave)
+        
+        # Pulse animation hook
+        pulse_animation_running = False
+        def start_pulse():
+            nonlocal pulse_animation_running
+            if not pulse_animation_running:
+                pulse_animation_running = True
+                pulse_border()
+                root.after(1000, pulse_border)
+    
+        def pulse_border():
+            if not settings["interactive"]["beeping_lights"]:
+                return
+        try:
+                current_bg = btn.cget("highlightbackground")
+                if current_bg == "#004422":
+                    btn.configure(highlightbackground="#006633")
+                elif current_bg == "#006633":
+                    btn.configure(highlightbackground="#004422")
+        except Exception:
+                pass
+        # Random offset to avoid synced pulsing
+        root.after(random.randint(800, 1500), pulse_border)
+        
+        # Start pulsing
+        root.after(1000, pulse_border)
+    
+    return btn
+    add_tooltip(btn, tooltip_text)  # Adds tooltip to the button
+    return btn
+
+# --- File / Save Buttons ---
+btn_open_folder = make_button("Open", open_project_folder, is_toolbar=True)
+btn_open_folder.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_open_folder, "Open your project folder.")
+toolbar_buttons.append(btn_open_folder)
+
+btn_save_file = make_button("Save", save_current_file, is_toolbar=True)
+btn_save_file.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_save_file, "Save the currently opened file.")
+toolbar_buttons.append(btn_save_file)
+
+btn_save_as = make_button("Save As", save_as_file, is_toolbar=True)
+btn_save_as.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_save_as, "Save the currently opened file with a new name.")
+toolbar_buttons.append(btn_save_as)
+
+btn_save_all = make_button("Save All", save_all_files, is_toolbar=True)
+btn_save_all.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_save_all, "Save all files currently in the queue.")
+toolbar_buttons.append(btn_save_all)
+
+# --- Undo / Redo ---
+btn_undo = make_button("Undo", undo_editor, is_toolbar=True)
+btn_undo.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_undo, "Undo the last edit.")
+toolbar_buttons.append(btn_undo)
+
+btn_redo = make_button("Redo", redo_editor, is_toolbar=True)
+btn_redo.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_redo, "Redo the last undone edit.")
+toolbar_buttons.append(btn_redo)
+
+# --- AI Queue / Execution ---
+btn_rogue_guide = make_button("Guide", rogue_agent_guide, is_toolbar=True)
+btn_rogue_guide.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_rogue_guide, "Copy instructions for AI to understand the editor")
+toolbar_buttons.append(btn_rogue_guide)
+
+btn_copy_errors = make_button("Copy Errors", copy_error_log, is_toolbar=True)
+btn_copy_errors.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_copy_errors, "Copy last 50 lines of error log to clipboard")
+toolbar_buttons.append(btn_copy_errors)
+
+btn_project_report = make_button("Copy Report", copy_project_report, is_toolbar=True)
+btn_project_report.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_project_report, "Copy full project files, queue, and metadata as JSON")
+toolbar_buttons.append(btn_project_report)
+
+btn_short_report = make_button("Copy Short", copy_short_project_report, is_toolbar=True)
+btn_short_report.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_short_report, "Copy condensed project overview for AI")
+toolbar_buttons.append(btn_short_report)
+
+btn_paste_instructions = make_button("Paste", paste_instructions, is_toolbar=True)
+btn_paste_instructions.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_paste_instructions, "Paste JSON instructions from AI Browser into queue.")
+toolbar_buttons.append(btn_paste_instructions)
+
+btn_execute = make_button("Execute", execute_agent, is_toolbar=True)
+btn_execute.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_execute, "Execute all queued tasks.")
+toolbar_buttons.append(btn_execute)
+
+# Enhanced Clear Queue button with blinking effect
+def create_queue_label():
+    """Create animated queue label"""
+    queue_label = tk.Label(
+        queue_frame,
+        text="◈ NEURAL QUEUE: ACTIVE ◈",
+        font=("Courier New", 11, "bold"),
+        bg=BG_PANEL,
+        fg="#00ff00"
+    )
+    queue_label.pack(side=tk.TOP, pady=(5, 0))
+    
+    # Add blinking animation to queue label
+    def blink_queue_label():
+        try:
+            colors = ["#00ff00", "#ffff00", "#00ffff", "#ff00ff"]
+            current_color = queue_label.cget("fg")
+            new_color = random.choice(colors)
+            queue_label.config(fg=new_color)
+            # Use root.after since queue_frame might not be accessible
+            root.after(1000, blink_queue_label)
+        except Exception:
+            pass
+    
+    if settings["interactive"]["beeping_lights"]:
+        blink_queue_label()
+    
+    return queue_label
+
+# Create enhanced queue label
+queue_title_label = create_queue_label()
+
+btn_clear_queue = make_button("Clear", clear_queue, is_toolbar=True)
+btn_clear_queue.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_clear_queue, "Clear all tasks from the queue.")
+toolbar_buttons.append(btn_clear_queue)
+
+btn_prev_queue = make_button("← Prev", select_previous_queue, is_toolbar=True)
+btn_prev_queue.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_prev_queue, "Go to the previous queue task.")
+toolbar_buttons.append(btn_prev_queue)
+
+btn_next_queue = make_button("Next →", select_next_queue, is_toolbar=True)
+btn_next_queue.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_next_queue, "Go to the next queue task.")
+toolbar_buttons.append(btn_next_queue)
+
+terminal_visible = True
+def toggle_terminal():
+    global terminal_visible
+    if terminal_visible:
+        editor_paned.forget(terminal_panel)
+        terminal_visible = False
+    else:
+        editor_paned.add(terminal_panel, stretch="never", height=200)
+        terminal_visible = True
+
+btn_terminal = make_button("Terminal", toggle_terminal, is_toolbar=True)
+btn_terminal.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_terminal, "Toggle Terminal Panel")
+toolbar_buttons.append(btn_terminal)
+
+btn_user_guide = make_button("Help", show_user_guide, is_toolbar=True)
+btn_user_guide.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_user_guide, "Show the user guide for Rogue Agent Editor.")
+toolbar_buttons.append(btn_user_guide)
+
+# --- Info / Guide ---
+btn_about = make_button("About", show_about_me, is_toolbar=True)
+btn_about.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_about, "Show author information.")
+toolbar_buttons.append(btn_about)
+
+def apply_button_palette():
+    palette = settings["interactive"]["button_palette"]
+    if palette == "neon":
+        base = "#2f2f2f"
+        active = "#00eaff"
+    elif palette == "magenta":
+        base = "#3a2a3d"
+        active = "#ff00aa"
+    elif palette == "aqua":
+        base = "#294a4a"
+        active = "#00ffaa"
+    elif palette == "amber":
+        base = "#4a3a29"
+        active = "#ffaa00"
+    elif palette == "emerald":
+        base = "#2a3d2a"
+        active = "#00ff66"
+    else:
+        base = ACCENT
+        active = HIGHLIGHT
+    for b in toolbar_buttons:
+        b.configure(bg=base, activebackground=active)
+def show_settings_panel():
+    global settings_panel
+    if settings_panel and settings_panel.winfo_exists():
+        # If the panel exists, destroy it (toggle behavior)
+        settings_panel.destroy()
+        settings_panel = None
+        return
+
+    # Centralized Cyberpunk Control Panel
+    settings_panel = tk.Toplevel(root)
+    settings_panel.title("CYBERPUNK CONTROL CENTER")
+    
+    # Calculate center position relative to root
+    panel_w = 500
+    panel_h = 700
+    
+    # Get root window position and size
+    root_x = root.winfo_x()
+    root_y = root.winfo_y()
+    root_w = root.winfo_width()
+    root_h = root.winfo_height()
+    
+    # Calculate center coordinates
+    center_x = root_x + (root_w // 2) - (panel_w // 2)
+    center_y = root_y + (root_h // 2) - (panel_h // 2)
+    
+    settings_panel.geometry(f"{panel_w}x{panel_h}+{center_x}+{center_y}")
+    settings_panel.configure(bg=BG_MAIN)
+    settings_panel.transient(root)
+    
+    # Header for the panel
+    header_f = tk.Frame(settings_panel, bg="#111111", height=40)
+    header_f.pack(fill=tk.X)
+    tk.Label(header_f, text="NEURAL INTERFACE CONFIG", bg="#111111", fg="#00ff66", font=("Consolas", 12, "bold")).pack(pady=10)
+
+    nb = ttk.Notebook(settings_panel)
+    nb.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+    
+    style = ttk.Style()
+    style.configure("TNotebook", background=BG_MAIN)
+    style.configure("TNotebook.Tab", background=ACCENT, foreground=FG_TEXT, padding=[10, 5])
+    style.map("TNotebook.Tab", background=[("selected", "#00ff66")], foreground=[("selected", "black")])
+
+    f_visual = tk.Frame(nb, bg=BG_MAIN)
+    f_audio = tk.Frame(nb, bg=BG_MAIN)
+    f_perf = tk.Frame(nb, bg=BG_MAIN)
+
+    nb.add(f_visual, text="VISUALS")
+    nb.add(f_audio, text="AUDIO")
+    nb.add(f_perf, text="SYSTEM")
+
+    # --- VISUALS TAB ---
+    tk.Label(f_visual, text="--- MATRIX RAIN ---", bg=BG_MAIN, fg="#00ff66", font=("Consolas", 10, "bold")).pack(pady=(10, 5))
+    
+    cov = tk.StringVar(value=settings["matrix"]["coverage"])
+    def set_cov(v):
+        settings["matrix"]["coverage"] = v
+        init_matrix()
+    
+    f_cov = tk.Frame(f_visual, bg=BG_MAIN)
+    f_cov.pack(fill=tk.X, padx=20)
+    tk.Radiobutton(f_cov, text="HEADER ONLY", variable=cov, value="header", command=lambda: set_cov("header"), bg=BG_MAIN, fg=FG_TEXT, selectcolor=BG_PANEL, activebackground=BG_MAIN).pack(side=tk.LEFT, expand=True)
+    tk.Radiobutton(f_cov, text="FULL OVERLAY", variable=cov, value="full", command=lambda: set_cov("full"), bg=BG_MAIN, fg=FG_TEXT, selectcolor=BG_PANEL, activebackground=BG_MAIN).pack(side=tk.LEFT, expand=True)
+
+    tk.Label(f_visual, text="DENSITY (STREAMS PER COL)", bg=BG_MAIN, fg=FG_TEXT).pack(anchor="w", padx=20, pady=(10, 0))
+    dens = tk.IntVar(value=settings["matrix"]["density_per_column"])
+    def on_density(v):
+        settings["matrix"]["density_per_column"] = int(float(v))
+        init_matrix()
+    tk.Scale(f_visual, from_=1, to=10, orient="horizontal", variable=dens, command=on_density, bg=BG_MAIN, fg="#00ff66", troughcolor=ACCENT, highlightthickness=0).pack(fill=tk.X, padx=20)
+    
+    # Cycle Matrix Color Button
+    tk.Button(f_visual, text="CYCLE MATRIX COLOR SCHEME", command=toggle_matrix_color, bg=BG_PANEL, fg=FG_TEXT, relief=tk.RAISED, font=("Consolas", 9)).pack(anchor="w", padx=20, pady=(10, 0))
+
+    tk.Label(f_visual, text="--- CRT EFFECT ---", bg=BG_MAIN, fg="#00ff66", font=("Consolas", 10, "bold")).pack(pady=(20, 5))
+    
+    crt_en = tk.BooleanVar(value=settings["crt"]["enabled"])
+    def on_crt():
+        if crt_en.get():
+            settings["crt"]["enabled"] = True
+            # Ensure intensity is reset if it was off
+            if settings["crt"]["intensity"] < 0.01:
+                settings["crt"]["intensity"] = 0.0
+            
+            # Use the slider value as target, default to 0.4 if slider is effectively off
+            target = inten.get()
+            if target < 0.05:
+                target = 0.4
+                inten.set(target)
+                
+            animate_crt_to(target, settings["crt"]["transition_ms"])
+        else:
+            animate_crt_to(0.0, settings["crt"]["transition_ms"])
+            settings["crt"]["enabled"] = False
+    tk.Checkbutton(f_visual, variable=crt_en, command=on_crt, bg=BG_MAIN, fg=FG_TEXT, selectcolor=BG_PANEL, text="ENABLE SCANLINES", font=("Consolas", 9)).pack(anchor="w", padx=20)
+
+    tk.Label(f_visual, text="CRT INTENSITY", bg=BG_MAIN, fg=FG_TEXT).pack(anchor="w", padx=20, pady=(10, 0))
+    inten = tk.DoubleVar(value=settings["crt"]["intensity"])
+    def on_inten(v):
+        target = float(v)
+        if settings["crt"]["enabled"]:
+            animate_crt_to(target, settings["crt"]["transition_ms"])
+        else:
+            settings["crt"]["intensity"] = target
+    tk.Scale(f_visual, from_=0.0, to=1.0, resolution=0.01, orient="horizontal", variable=inten, command=on_inten, bg=BG_MAIN, fg="#00ff66", troughcolor=ACCENT, highlightthickness=0).pack(fill=tk.X, padx=20)
+
+    # --- AUDIO TAB ---
+    tk.Label(f_audio, text="--- CYBERPUNK AMBIENCE ---", bg=BG_MAIN, fg="#00ff66", font=("Consolas", 10, "bold")).pack(pady=(10, 5))
+    
+    # Initialize with current state
+    muen = tk.BooleanVar(value=settings["audio"].get("music_enabled", False))
+    def on_muen():
+        try:
+            settings["audio"]["music_enabled"] = muen.get()
+            if muen.get():
+                start_music(settings)
+            else:
+                stop_music()
+        except Exception as e:
+            print(f"Audio system disabled due to error: {e}")
+            # Disable audio if there's an error
+            muen.set(False)
+            settings["audio"]["music_enabled"] = False
+    
+    tk.Checkbutton(f_audio, variable=muen, command=on_muen, bg=BG_MAIN, fg=FG_TEXT, selectcolor=BG_PANEL, text="CYBERPUNK AMBIENCE (EXPERIMENTAL)", font=("Consolas", 9)).pack(anchor="w", padx=20)
+
+    tk.Label(f_audio, text="VOLUME", bg=BG_MAIN, fg=FG_TEXT).pack(anchor="w", padx=20, pady=(10, 0))
+    muvol = tk.DoubleVar(value=settings["audio"]["music_volume"])
+    def on_muvol(v):
+        try:
+            settings["audio"]["music_volume"] = float(v)
+            if AUDIO_ENGINE_AVAILABLE:
+                try:
+                    set_local_volume(float(v))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    tk.Scale(f_audio, from_=0.0, to=1.0, resolution=0.01, orient="horizontal", variable=muvol, command=on_muvol, bg=BG_MAIN, fg="#00ff66", troughcolor=ACCENT, highlightthickness=0).pack(fill=tk.X, padx=20)
+
+    # --- LOCAL AUDIO ---
+    tk.Label(f_audio, text="--- LOCAL AUDIO ---", bg=BG_MAIN, fg="#00ff66", font=("Consolas", 10, "bold")).pack(pady=(20, 5))
+    
+    # File selection variable
+    audio_files = [] # Start empty, let user browse
+    current_file = settings["audio"].get("music_file", "")
+    selected_audio = tk.StringVar(value=current_file if current_file else "No Selection")
+    
+    def on_audio_select(event):
+        val = audio_combo.get()
+        if val == "No Selection":
+            settings["audio"]["music_file"] = ""
+        else:
+            settings["audio"]["music_file"] = val
+            
+    # Use current_file in values if it exists
+    initial_values = ["No Selection"]
+    if current_file:
+        initial_values.append(current_file)
+        
+    audio_combo = ttk.Combobox(f_audio, textvariable=selected_audio, values=initial_values, state="readonly")
+    audio_combo.pack(fill=tk.X, padx=20)
+    audio_combo.bind("<<ComboboxSelected>>", on_audio_select)
+    
+    # CONTROLS
+    f_controls = tk.Frame(f_audio, bg=BG_MAIN)
+    f_controls.pack(fill=tk.X, padx=20, pady=10)
+    
+    def on_stop():
+        stop_local_audio()
+        
+    def on_play():
+        resume_local_audio()
+        
+    def on_pause():
+        pause_local_audio()
+        
+    btn_stop = tk.Button(f_controls, text="STOP", command=on_stop, bg=BG_PANEL, fg=FG_TEXT, width=8, relief=tk.FLAT, font=("Consolas", 9, "bold"))
+    btn_stop.pack(side=tk.LEFT, padx=(0, 5))
+    
+    btn_play = tk.Button(f_controls, text="PLAY", command=on_play, bg=BG_PANEL, fg=FG_TEXT, width=8, relief=tk.FLAT, font=("Consolas", 9, "bold"))
+    btn_play.pack(side=tk.LEFT, padx=5)
+    
+    btn_pause = tk.Button(f_controls, text="PAUSE", command=on_pause, bg=BG_PANEL, fg=FG_TEXT, width=8, relief=tk.FLAT, font=("Consolas", 9, "bold"))
+    btn_pause.pack(side=tk.LEFT, padx=5)
+        
+    f_audio_actions = tk.Frame(f_audio, bg=BG_MAIN)
+    f_audio_actions.pack(fill=tk.X, padx=20, pady=5)
+
+    def browse_audio_file():
+        file_path = filedialog.askopenfilename(
+            title="Select Audio File",
+            filetypes=[("Audio Files", "*.wav *.mp3"), ("WAV Files", "*.wav"), ("MP3 Files", "*.mp3")]
+        )
+        if file_path:
+            settings["audio"]["music_file"] = file_path
+            current_values = list(audio_combo['values'])
+            if file_path not in current_values:
+                audio_combo['values'] = current_values + [file_path]
+            selected_audio.set(file_path)
+
+    btn_browse = tk.Button(f_audio_actions, text="BROWSE...", command=browse_audio_file, bg=BG_PANEL, fg=FG_TEXT, relief=tk.FLAT)
+    btn_browse.pack(side=tk.LEFT)
+    
+    # Refresh button removed as per user request to hide auto-scanned files
+
+    # --- SYSTEM TAB ---
+    tk.Label(f_perf, text="--- UI PALETTE ---", bg=BG_MAIN, fg="#00ff66", font=("Consolas", 10, "bold")).pack(pady=(10, 5))
+    pal = tk.StringVar(value=settings["interactive"]["button_palette"])
+    def on_pal(*a):
+        settings["interactive"]["button_palette"] = pal.get()
+        apply_button_palette()
+    
+    pal_combo = ttk.Combobox(f_perf, textvariable=pal, values=["neon","magenta","aqua","amber","emerald"], state="readonly")
+    pal_combo.pack(fill=tk.X, padx=20)
+    pal_combo.bind("<<ComboboxSelected>>", on_pal)
+
+    tk.Label(f_perf, text="--- PERFORMANCE QUALITY ---", bg=BG_MAIN, fg="#00ff66", font=("Consolas", 10, "bold")).pack(pady=(20, 5))
+    qual = tk.StringVar(value=settings["performance"]["quality"])
+    def on_qual(*a):
+        settings["performance"]["quality"] = qual.get()
+        apply_quality()
+    
+    qual_combo = ttk.Combobox(f_perf, textvariable=qual, values=["low","medium","high"], state="readonly")
+    qual_combo.pack(fill=tk.X, padx=20)
+    qual_combo.bind("<<ComboboxSelected>>", on_qual)
+
+    def on_close():
+        global settings_panel
+        save_settings()
+        settings_panel.destroy()
+        settings_panel = None
+    settings_panel.protocol("WM_DELETE_WINDOW", on_close)
+    
+    # Footer
+    tk.Label(settings_panel, text="STATUS: SYSTEM NOMINAL", bg=BG_MAIN, fg="#00ff66", font=("Consolas", 8)).pack(side=tk.BOTTOM, pady=5)
+
+btn_settings = make_button("NEURAL", show_settings_panel, is_toolbar=True)
+btn_settings.pack(side=tk.LEFT, padx=5)
+add_tooltip(btn_settings, "Open Neural Interface Config for visuals and audio")
+toolbar_buttons.append(btn_settings)
+apply_button_palette()
+# =====================
+# 🎛️ Filter Dropdown
+# =====================
+def update_filter_menu():
+    exts = set()
+    for rel in file_map.keys():
+        ext = os.path.splitext(rel)[1]
+        if ext:
+            exts.add(ext)
+    items = ["All"] + sorted(exts)
+    m = filter_menu["menu"]
+    m.delete(0, "end")
+    for it in items:
+        m.add_command(label=it, command=lambda v=it: (filter_var.set(v), set_filter(v)))
+    if filter_var.get() not in items:
+        filter_var.set("All")
+filter_var = tk.StringVar(value="All")
+filter_menu = tk.OptionMenu(file_frame, filter_var, "All", command=set_filter)
+filter_menu.config(bg=ACCENT, fg=FG_TEXT, highlightthickness=0, relief=tk.FLAT)
+filter_menu.pack(anchor="w", padx=10, pady=4)
+
+# =====================
+# 🚀 DRAG & DROP FILE OPEN
+# =====================
+def drop_file(event):
+    path = event.data
+    if os.path.isfile(path):
+        open_selected_file(path=path)
+try:
+    root.tk.call('package', 'require', 'tkdnd')
+    code_editor.drop_target_register(DND_FILES)
+    code_editor.dnd_bind('<<Drop>>', drop_file)
+except Exception:
+    pass
+
+# =====================
+# ⏱️ AUTO-REFRESH PROJECT (main thread safe)
+# =====================
+def schedule_refresh():
+    if BASE_DIR:
+        scan_project_files()
+        refresh_file_list()
+    root.after(5000, schedule_refresh)
+
+# =====================
+# 🚀 INIT
+# =====================
+
+# Editor save
+root.bind('<Control-s>', save_current_file)
+
+# 🔎 Search bindings
+search_entry.bind("<Return>", search_code)
+search_entry.bind("<Escape>", lambda e: clear_search())
+
+root.bind("<Control-f>", lambda e: search_entry.focus_set())
+root.bind("<F3>", lambda e: find_next())
+root.bind("<Shift-F3>", lambda e: find_prev())
+
+# =====================
+# 🖥️ FULL SCREEN TOGGLE
+# =====================
+is_fullscreen = False
+
+def toggle_fullscreen(event=None):
+    global is_fullscreen
+    is_fullscreen = not is_fullscreen
+    root.attributes("-fullscreen", is_fullscreen)
+    
+    # Force layout update
+    root.update_idletasks()
+    
+    # Redraw header to ensure centering
+    draw_neon_logo()
+    
+    # Update Matrix Overlay if active
+    if settings["matrix"]["coverage"] == "full":
+        ensure_matrix_canvas()
+
+root.bind("<F11>", toggle_fullscreen)
+
+refresh_queue_viewer()
+schedule_refresh()
+root.protocol("WM_DELETE_WINDOW", on_closing)
+root.mainloop()
+
+

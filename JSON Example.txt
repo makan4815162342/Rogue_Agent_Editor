@@ -1,0 +1,37 @@
+{
+  "queue": [
+    {
+      "file_path": "project_files/example.py",
+      "task": "Add Persian Poems",
+      "instructions": "Append Persian poems to the example.py file below the existing English poem. Keep all existing code intact.",
+      "code": "# Example Python file for Rogue Agent Editor\n# Objective: Improve this code with AI instructions\n\ndef greet(name):\n    return \"Hello, \" + name\n\n# TODO: Improve this to greet in uppercase if name is short\nprint(greet(\"Makan\"))\n\ndef farewell(name):\n    print(\"Goodbye, \" + name)\n\nfarewell(\"Makan\")\n\n\"\"\"\nA Whisper of Code\n\nIn the quiet hum of circuits bright,\nA rogue agent wakes to the night.\nLines of logic twist and play,\nGuiding code in a secret ballet.\n\nVariables dance and functions sing,\nLoops that turn like wind on a wing.\nErrors whisper, subtle, sly,\nYet solutions bloom where they lie.\n\nFrom JSON queues to Python dreams,\nEvery byte flows in endless streams.\nThe AI watches, learns, and sees,\nA world of code among the trees.\n\nSo type, create, and let it grow,\nA symphony of logic in rhythmic flow.\nFor in each script, both large and small,\nThe heart of a coder beats through all.\n\"\"\"\n\n\"\"\"\nPersian Poems\n\nاز دل برود هر آنکه از دیده رود\nهرگز نخواهد رفت از دل من، ای دوست\n\nبه یاد تو هر لحظه دل من شاد است\nلحظه‌ها بدون تو چون شب تار است\n\nموجی که بر ساحل آرام می‌خورد\nیاد تو در دل من همیشه می‌تپد\n\nگل نرگس در باغ خفته است هنوز\nهمچنان دل من در هوای توست\n\"\"\""
+    }
+  ]
+}
+
+
+{
+  "queue": [
+    {
+      "file_path": "project_files/example.py",
+      "task": "Replace with Ciri & Female V Poem",
+      "instructions": "Remove all previous poems from example.py and append only the new poem about Ciri and Female V. Keep all Python code intact.",
+      "code": "# Example Python file for Rogue Agent Editor\n# Objective: Improve this code with AI instructions\n\ndef greet(name):\n    return \"Hello, \" + name\n\n# TODO: Improve this to greet in uppercase if name is short\nprint(greet(\"Makan\"))\n\ndef farewell(name):\n    print(\"Goodbye, \" + name)\n\nfarewell(\"Makan\")\n\n\"\"\"\nCiri & Female V: Heroes Across Worlds\n\nIn streets of Neon and towers high,\nFemale V walks, her head held nigh.\nCiri leaps through time and space,\nSilver sword swift, a radiant grace.\n\nTwo worlds collide, yet courage aligns,\nIn Night City nights and Kaer Morhen pines.\nCyber hacks blend with Witcher might,\nEvery step a tale, each glance a fight.\n\nSide by side in code and dream,\nThey chase the shadows, light the gleam.\nThrough glowing screens and magic streams,\nThey live the stories of our dreams.\n\"\"\""
+    }
+  ]
+}
+
+
+
+{
+  "queue": [
+    {
+      "file_path": "project_files/example.py",
+      "task": "Add New Ciri & Female V Poem",
+      "instructions": "Remove any previous poems and append this brand-new poem about Ciri and Female V. Keep all Python code intact.",
+      "code": "# Example Python file for Rogue Agent Editor\n# Objective: Improve this code with AI instructions\n\ndef greet(name):\n    return \"Hello, \" + name\n\n# TODO: Improve this to greet in uppercase if name is short\nprint(greet(\"Makan\"))\n\ndef farewell(name):\n    print(\"Goodbye, \" + name)\n\nfarewell(\"Makan\")\n\n\"\"\"\nCiri & Female V: A Dance Through Worlds\n\nThrough the neon glow and ancient woods,\nFemale V strides, defying the odds.\nCiri whirls on time’s unseen thread,\nSilver sparks from sword and dread.\n\nShadows fall but hearts ignite,\nIn Night City nights and Kaer Morhen light.\nCyber dreams meet Witcher lore,\nEvery step opens a hidden door.\n\nThey ride the chaos, swift and free,\nTwo heroines across reality.\nMagic, steel, and digital streams,\nBound together in endless dreams.\n\"\"\""
+    }
+  ]
+}
+
+
